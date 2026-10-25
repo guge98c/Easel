@@ -53,16 +53,17 @@ RUN /app/.venv/bin/python -m playwright install chromium \
 # OpenClaw 执行引擎（npmmirror）
 RUN npm install -g openclaw@latest --registry https://registry.npmmirror.com --loglevel warn
 
-# 非 root 用户（UID 1000，对齐 NAS nasweb；运行时由 compose 指定 user: "1000:1001"）
-RUN useradd -m -u 1000 -s /bin/bash easel \
-    && mkdir -p /app/outputs /app/profiles \
-    && chown -R 1000:1000 /app/outputs /app/profiles /home/easel
+# 非 root：镜像自带 node 用户（UID 1000，与 NAS nasweb 对齐）
+# 运行时由 compose 指定 user: "1000:1001"；HOME=/home/node 属主 1000，可写
+RUN mkdir -p /app/outputs /app/profiles \
+    /home/node/.openclaw-easel /home/node/.easel-browser-profiles \
+    && chown -R 1000:1000 /app/outputs /app/profiles /home/node
 
 COPY docker/entrypoint.sh /usr/local/bin/easel-entrypoint.sh
 RUN chmod +x /usr/local/bin/easel-entrypoint.sh
 
 ENV EASEL_ROOT=/app \
-    HOME=/home/easel \
+    HOME=/home/node \
     PATH=/app/.venv/bin:/usr/local/bin:$PATH
 
 EXPOSE 7860
