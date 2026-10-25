@@ -1,0 +1,11 @@
+# Easel 镜像构建上下文排除（本地与构建无关的重目录）
+.git
+.gitignore
+.venv
+**/node_modules
+web/frontend/dist
+outputs
+profiles
+.easel-browser-profiles
+*.log
+/tmp
