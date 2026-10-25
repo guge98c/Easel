@@ -53,10 +53,14 @@ RUN /app/.venv/bin/python -m playwright install chromium \
 # OpenClaw 执行引擎（npmmirror）
 RUN npm install -g openclaw@latest --registry https://registry.npmmirror.com --loglevel warn
 
+# OpenCode 执行引擎（npmmirror；Web 设置 → 执行引擎 可选 OpenCode，原生认证 opencode auth login）
+RUN npm install -g @opencode/cli --registry https://registry.npmmirror.com --loglevel warn
+
 # 非 root：镜像自带 node 用户（UID 1000，与 NAS nasweb 对齐）
 # 运行时由 compose 指定 user: "1000:1001"；HOME=/home/node 属主 1000，可写
 RUN mkdir -p /app/outputs /app/profiles \
     /home/node/.openclaw-easel /home/node/.easel-browser-profiles \
+    /home/node/.config/opencode /home/node/.local/share/opencode /home/node/.cache/opencode \
     && chown -R 1000:1000 /app/outputs /app/profiles /home/node
 
 COPY docker/entrypoint.sh /usr/local/bin/easel-entrypoint.sh
