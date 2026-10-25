@@ -18,38 +18,47 @@ export EASEL_ROOT="${EASEL_ROOT:-/app}"
 export HOME="${HOME:-/home/node}"
 export PATH="/app/.venv/bin:/usr/local/bin:$PATH"
 
-# ---- 1. 初始化 OpenClaw easel profile（幂等）----
-OPENCLAW_HOME="$HOME/.openclaw-easel"
-if [ ! -f "$OPENCLAW_HOME/openclaw.json" ]; then
-    echo "[easel] 初始化 OpenClaw profile (easel) ..."
-    mkdir -p "$OPENCLAW_HOME"
-    if openclaw --profile easel onboard --help >/dev/null 2>&1; then
-        # 探测可用参数，逐个跳过非必要模块；daemon 相关参数随版本不同
-        ARGS=(onboard --non-interactive --mode local --accept-risk)
-        for flag in --skip-health --skip-channels --skip-skills --skip-ui --skip-hooks --skip-search --skip-daemon; do
-            if openclaw --profile easel onboard --help 2>&1 | grep -q -- "$flag"; then
-                ARGS+=("$flag")
-            fi
-        done
-        openclaw --profile easel "${ARGS[@]}" 2>&1 | tail -5 || true
+# 执行引擎：默认 openclaw；opencode/codex/acp/api 时跳过 OpenClaw 专属步骤
+RUNTIME="${EASEL_AGENT_RUNTIME:-openclaw}"
+
+# ---- 1. 初始化 OpenClaw easel profile（仅 openclaw 引擎，幂等）----
+if [ "$RUNTIME" = "openclaw" ]; then
+    OPENCLAW_HOME="$HOME/.openclaw-easel"
+    if [ ! -f "$OPENCLAW_HOME/openclaw.json" ]; then
+        echo "[easel] 初始化 OpenClaw profile (easel) ..."
+        mkdir -p "$OPENCLAW_HOME"
+        if openclaw --profile easel onboard --help >/dev/null 2>&1; then
+            # 探测可用参数，逐个跳过非必要模块；daemon 相关参数随版本不同
+            ARGS=(onboard --non-interactive --mode local --accept-risk)
+            for flag in --skip-health --skip-channels --skip-skills --skip-ui --skip-hooks --skip-search --skip-daemon; do
+                if openclaw --profile easel onboard --help 2>&1 | grep -q -- "$flag"; then
+                    ARGS+=("$flag")
+                fi
+            done
+            openclaw --profile easel "${ARGS[@]}" 2>&1 | tail -5 || true
+        else
+            openclaw --profile easel setup --non-interactive --mode local --accept-risk 2>&1 | tail -5 || true
+        fi
+        # onboard 失败不致命：gateway 有 --allow-unconfigured，Web 设置里还能补
+        echo "[easel] profile 初始化完成（或跳过，gateway 将容错启动）"
     else
-        openclaw --profile easel setup --non-interactive --mode local --accept-risk 2>&1 | tail -5 || true
+        echo "[easel] OpenClaw profile 已存在，跳过初始化"
     fi
-    # onboard 失败不致命：gateway 有 --allow-unconfigured，Web 设置里还能补
-    echo "[easel] profile 初始化完成（或跳过，gateway 将容错启动）"
 else
-    echo "[easel] OpenClaw profile 已存在，跳过初始化"
+    echo "[easel] 执行引擎: $RUNTIME（跳过 OpenClaw profile/gateway）"
 fi
 
-# ---- 2. 同步 skills 到 agent workspace（幂等）----
+# ---- 2. 同步 skills 到 agent workspace（幂等，OpenCode/ACP 亦读取 agents/workspace）----
 if [ -x "$EASEL_ROOT/agents/sync.sh" ]; then
     echo "[easel] 同步 skills ..."
     bash "$EASEL_ROOT/agents/sync.sh" >/dev/null 2>&1 || echo "[easel] skills 同步跳过（不阻断启动）"
 fi
 
-# ---- 3. 启动 OpenClaw gateway（后台）----
-echo "[easel] 启动 gateway ..."
-bash "$EASEL_ROOT/scripts/gateway.sh" start >/dev/null 2>&1 || echo "[easel] gateway 启动容错（日志: /tmp/easel-gateway.log）"
+# ---- 3. 启动 OpenClaw gateway（仅 openclaw 引擎，后台）----
+if [ "$RUNTIME" = "openclaw" ]; then
+    echo "[easel] 启动 gateway ..."
+    bash "$EASEL_ROOT/scripts/gateway.sh" start >/dev/null 2>&1 || echo "[easel] gateway 启动容错（日志: /tmp/easel-gateway.log）"
+fi
 
 # ---- 4. 启动 Web 工作台（前台，容器存活锚点）----
 echo "[easel] 启动 Web 工作台 :${EASEL_PORT:-7860} ..."
