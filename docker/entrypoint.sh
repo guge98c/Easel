@@ -15,7 +15,7 @@
 set -euo pipefail
 
 export EASEL_ROOT="${EASEL_ROOT:-/app}"
-export HOME="${HOME:-/home/easel}"
+export HOME="${HOME:-/home/node}"
 export PATH="/app/.venv/bin:/usr/local/bin:$PATH"
 
 # ---- 1. 初始化 OpenClaw easel profile（幂等）----
