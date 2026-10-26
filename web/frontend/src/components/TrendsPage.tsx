@@ -14,6 +14,10 @@ const ALL_PLATFORMS: { key: string; label: string }[] = [
   { key: 'bilibili', label: 'B站' },
   { key: 'baidu', label: '百度' },
   { key: 'toutiao', label: '头条' },
+  { key: 'ai', label: 'AI' },
+  { key: 'wool', label: '羊毛' },
+  { key: 'sideline', label: '副业' },
+  { key: 'media', label: '媒体' },
 ];
 
 export default function TrendsPage({ onUseTopic }: TrendsPageProps) {
