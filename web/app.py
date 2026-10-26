@@ -5450,26 +5450,33 @@ def _fetch_tgmeng(cat_key: str) -> list[dict]:
     cfg = TGMENG_CATEGORIES.get(cat_key)
     if not cfg:
         return []
-    url = f"https://tgmeng.com/api/daily-reports?category={cfg['slug']}&limit=15"
+    body = json.dumps({
+        "license": "BVJQ-QTM2-Y8D5-BS09-9BDM-7BH2",
+        "mode": "REALTIME",
+        "rootCategories": [cfg["label"]],
+        "limit": 15,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://trendapi.tgmeng.com/api/skill/search",
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+        method="POST",
+    )
     try:
-        payload = _http_get_json(url, timeout=10)
+        with urllib.request.urlopen(req, timeout=12) as r:
+            payload = json.loads(r.read().decode("utf-8", "replace"))
     except Exception:
         return []
-    rows = payload.get("items") if isinstance(payload, dict) else None
+    rows = (payload.get("data") or {}).get("items") if isinstance(payload, dict) else None
     out: list[dict] = []
     if isinstance(rows, list):
-        for it in rows:
+        for it in rows[:15]:
             if not isinstance(it, dict):
                 continue
             title = it.get("title")
             if not title or not isinstance(title, str):
                 continue
-            hot = it.get("heat")
-            out.append({
-                "title": title.strip(),
-                "hot": str(hot) if hot else "",
-                "url": f"https://tgmeng.com/daily?category={cfg['slug']}",
-            })
+            out.append({"title": title.strip(), "hot": "", "url": it.get("url") or ""})
     return out
 
 
