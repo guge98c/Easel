@@ -1,6 +1,3 @@
-# ---- Easel 镜像构建工作流（复刻 jianzhi build-and-push.yml 模式）----
-# 触发: push main 分支 / workflow_dispatch（n8n 定时 dispatch，同 jianzhi）
-# 产物: ghcr.io/guge98c/easel（linux/amd64，tag: branch / sha / main→latest）
 name: Build and Push Easel Image
 
 on:
@@ -37,7 +34,6 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha
-            type=raw,value={{ github.ref_name }},enable={{ github.event_name == 'workflow_dispatch' }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
