@@ -5369,6 +5369,13 @@ TREND_LABELS = {
     "baidu": "百度",
     "toutiao": "头条",
 }
+# 糖果梦分类栏目（公开 API，无需 license；与六平台独立）
+TGMENG_CATEGORIES: dict[str, dict[str, str]] = {
+    "ai": {"slug": "ai", "label": "AI"},
+    "wool": {"slug": "wool", "label": "羊毛"},
+    "sideline": {"slug": "sideline", "label": "副业"},
+    "media": {"slug": "media", "label": "媒体"},
+}
 _TREND_CACHE: dict[str, tuple[float, list]] = {}
 _HOT_TITLE_KEYS = ("title", "Title", "word", "name", "keyword")
 _HOT_HOT_KEYS = ("hot", "hot_value", "HotValue", "hotValue", "num", "detail_text")
@@ -5439,9 +5446,36 @@ def _fetch_platform(pf: str) -> list[dict]:
     return []
 
 
+def _fetch_tgmeng(cat_key: str) -> list[dict]:
+    cfg = TGMENG_CATEGORIES.get(cat_key)
+    if not cfg:
+        return []
+    url = f"https://tgmeng.com/api/daily-reports?category={cfg['slug']}&limit=15"
+    try:
+        payload = _http_get_json(url, timeout=10)
+    except Exception:
+        return []
+    rows = payload.get("items") if isinstance(payload, dict) else None
+    out: list[dict] = []
+    if isinstance(rows, list):
+        for it in rows:
+            if not isinstance(it, dict):
+                continue
+            title = it.get("title")
+            if not title or not isinstance(title, str):
+                continue
+            hot = it.get("heat")
+            out.append({
+                "title": title.strip(),
+                "hot": str(hot) if hot else "",
+                "url": f"https://tgmeng.com/daily?category={cfg['slug']}",
+            })
+    return out
+
+
 @app.get("/api/trends")
 async def api_trends(platforms: str = "weibo,douyin,zhihu", limit: int = 12):
-    pfs = [p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES]
+    pfs = [p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES or p.strip() in TGMENG_CATEGORIES]
     now = time.time()
     loop = asyncio.get_event_loop()
     result = []
@@ -5450,14 +5484,17 @@ async def api_trends(platforms: str = "weibo,douyin,zhihu", limit: int = 12):
         if c and now - c[0] < 300:
             items = c[1]
         else:
-            items = await loop.run_in_executor(None, _fetch_platform, pf)
+            if pf in TGMENG_CATEGORIES:
+                items = await loop.run_in_executor(None, _fetch_tgmeng, pf)
+            else:
+                items = await loop.run_in_executor(None, _fetch_platform, pf)
             if items:
                 _TREND_CACHE[pf] = (now, items)
             elif c:
                 items = c[1]
         result.append({
             "platform": pf,
-            "label": TREND_LABELS.get(pf, pf),
+            "label": TREND_LABELS.get(pf) or TGMENG_CATEGORIES.get(pf, {}).get("label") or pf,
             "items": items[:max(1, min(limit, 30))],
             "ok": bool(items),
         })
