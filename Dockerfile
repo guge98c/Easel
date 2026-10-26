@@ -4,10 +4,8 @@
 # 基础: node:24-bookworm-slim（Node 24 + Debian 12 + Python 3.11）
 #   - openclaw@latest 要求 Node >=24.16（25.x/26.0 被排除）→ 用 Node 24
 #   - Python 3.11 对全部重依赖（librosa/faster-whisper/rembg/opencv/biliup）wheel 兼容最好
-# 轻量方案（对齐 NAS 部署规则第十一步，规避 playwright 2GB 镜像假死事故）:
-#   - 不用 mcr.microsoft.com/playwright 官方大镜像，基础层仅 node:24-bookworm-slim
-#   - Chromium 走 PLAYWRIGHT_DOWNLOAD_HOST=npmmirror 镜像（~300MB）
-#   - npm 走 registry.npmmirror.com，pip 走清华源
+# 构建在 GitHub Actions (us-east runner) 执行 → 一律用官方源，避免走国内镜像抖动卡死
+#   npm=registry.npmjs.org / pip=pypi.org / playwright=官方CDN / apt=debian 官方
 # 构建产物推 ghcr.io/guge98c/easel（由 .github/workflows/build-and-push.yml 驱动）
 # ============================================================
 
@@ -15,8 +13,8 @@
 FROM node:24-bookworm-slim AS frontend-builder
 WORKDIR /src
 COPY web/frontend/package.json web/frontend/package-lock.json* ./
-RUN npm ci --registry https://registry.npmmirror.com --no-audit --no-fund \
-    || npm install --registry https://registry.npmmirror.com --no-audit --no-fund
+RUN npm ci --registry https://registry.npmjs.org --no-audit --no-fund \
+    || npm install --registry https://registry.npmjs.org --no-audit --no-fund
 COPY web/frontend/ ./
 RUN npm run build
 # 产物: /src/dist
@@ -40,21 +38,20 @@ COPY . .
 # 前端构建产物覆盖（优先于仓库内可能存在的旧 dist）
 COPY --from=frontend-builder /src/dist/ /app/web/frontend/dist/
 
-# Python 依赖 + easel CLI（清华源，优先 wheel 避免源码编译）
+# Python 依赖 + easel CLI（官方 PyPI，优先 wheel 避免源码编译）
 RUN python3 -m venv /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir --prefer-binary -e /app \
-        -i https://pypi.tuna.tsinghua.edu.cn/simple
+        -i https://pypi.org/simple
 
-# Playwright Chromium（npmmirror 镜像下载 + install-deps 自动装系统库，~300MB）
-ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+# Playwright Chromium（官方 CDN 下载 + install-deps 自动装系统库）
 RUN /app/.venv/bin/python -m playwright install chromium \
     && /app/.venv/bin/python -m playwright install-deps chromium
 
-# OpenClaw 执行引擎（npmmirror）
-RUN npm install -g openclaw@latest --registry https://registry.npmmirror.com --loglevel warn
+# OpenClaw 执行引擎（官方 npm）
+RUN npm install -g openclaw@latest --registry https://registry.npmjs.org --loglevel warn
 
-# OpenCode 执行引擎（npmmirror；Web 设置 → 执行引擎 可选 OpenCode，原生认证 opencode auth login）
-RUN npm install -g @opencode/cli --registry https://registry.npmmirror.com --loglevel warn
+# OpenCode 执行引擎（官方 npm；Web 设置 → 执行引擎 可选 OpenCode，原生认证 opencode auth login）
+RUN npm install -g @opencode/cli --registry https://registry.npmjs.org --loglevel warn
 
 # 非 root：镜像自带 node 用户（UID 1000，与 NAS nasweb 对齐）
 # 运行时由 compose 指定 user: "1000:1001"；HOME=/home/node 属主 1000，可写
