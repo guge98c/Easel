@@ -5736,6 +5736,141 @@ async def api_ideas_delete(iid: str):
     return {"ok": True, "deleted": iid}
 
 
+# ════════════ Aizc 爆款库（纯追加段，2026-10-28）════════════
+# 只读消费 Aizc_pick.csv（自包含：情报+拆解状态+正文，由 Windows 侧 grade-viral.py 生成，
+# 经 Windows↔NAS 目录同步到达 AIZC_PICK_DIR 挂载路径）。Easel 对 CSV 永远只读；
+# 拆解进度记在 outputs/_aizc_status.json（本机 overlay），不回写 CSV——
+# 管道每轮全量覆盖 Aizc_pick.csv 且自带状态继承，容器回写必然与覆盖/同步互相冲账。
+import csv  # noqa: E402  纯追加段自带依赖，避免改头部导入区
+
+AIZC_DIR = Path(os.environ.get("AIZC_PICK_DIR") or (OUTPUTS_DIR / "aizc"))
+AIZC_PICK_FILE = AIZC_DIR / "Aizc_pick.csv"
+AIZC_STATUS_FILE = OUTPUTS_DIR / "_aizc_status.json"
+AIZC_STATUSES = {"待拆", "已拆", "不拆"}
+_AIZC_CACHE: dict = {"mtime": None, "rows": None, "error": ""}
+
+
+def _wx_link_key(url: str) -> str:
+    """微信文章稳定主键：取链接 sn 参数（重采会换一套会话参数，sn 不变；无 sn 退回整串 URL）。"""
+    u = (url or "").strip()
+    try:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+        return (q.get("sn") or [""])[0] or u
+    except Exception:
+        return u
+
+
+def _read_aizc_marks() -> dict:
+    if not AIZC_STATUS_FILE.is_file():
+        return {}
+    try:
+        d = json.loads(AIZC_STATUS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_aizc_marks(marks: dict) -> None:
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = AIZC_STATUS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(marks, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(AIZC_STATUS_FILE)
+
+
+def _read_aizc_rows() -> tuple:
+    """读 Aizc_pick.csv（utf-8-sig，按 mtime 缓存）。解析失败沿用上一份好数据
+    （目录同步可能写到一半，宁可给旧数据也不白屏）。返回 (rows|None, error)。"""
+    if not AIZC_PICK_FILE.is_file():
+        return None, f"未找到 Aizc_pick.csv（AIZC_PICK_DIR={AIZC_DIR}）"
+    try:
+        mtime = AIZC_PICK_FILE.stat().st_mtime
+    except OSError as e:
+        return _AIZC_CACHE["rows"], f"读取失败：{e}"
+    if _AIZC_CACHE["rows"] is not None and _AIZC_CACHE["mtime"] == mtime:
+        return _AIZC_CACHE["rows"], ""
+    try:
+        with open(AIZC_PICK_FILE, encoding="utf-8-sig", newline="") as f:
+            rows = [r for r in csv.DictReader(f) if (r.get("标题") or "").strip()]
+        _AIZC_CACHE.update(mtime=mtime, rows=rows, error="")
+        return rows, ""
+    except Exception as e:
+        if _AIZC_CACHE["rows"] is not None:
+            _AIZC_CACHE["error"] = str(e)
+            return _AIZC_CACHE["rows"], f"解析失败（沿用上一份）：{e}"
+        return None, f"解析失败：{e}"
+
+
+def _aizc_item(r: dict, marks: dict) -> dict:
+    url = str(r.get("文章链接") or "").strip()
+    sn = _wx_link_key(url)
+    ov = marks.get(sn) if isinstance(marks.get(sn), dict) else {}
+    return {
+        "sn": sn,
+        "title": str(r.get("标题") or "").strip(),
+        "account": str(r.get("账号") or "").strip(),
+        "publishTime": str(r.get("发布时间") or "").strip(),
+        "reads": str(r.get("阅读量") or "").strip(),
+        "likes": str(r.get("点赞量") or "").strip(),
+        "url": url,
+        "interactionRate": str(r.get("互动率") or "").strip(),
+        "collectRate": str(r.get("收藏率") or "").strip(),
+        "reason": str(r.get("爆因") or "").strip(),
+        "articleGrade": str(r.get("文章档位") or "").strip(),
+        "accountGrade": str(r.get("账号档位") or "").strip(),
+        "subTrack": str(r.get("子赛道") or "").strip(),
+        # overlay 优先：Easel 侧标记 > CSV 状态（管道维护）
+        "status": (ov.get("status") or str(r.get("拆解状态") or "").strip() or "待拆"),
+        "hasBody": bool(str(r.get("正文") or "").strip()),
+    }
+
+
+@app.get("/api/aizc/pick")
+async def api_aizc_pick():
+    """爆款库列表：情报+状态（不含正文，正文按需走 /api/aizc/article，库大了列表也不膨胀）。"""
+    rows, err = _read_aizc_rows()
+    if rows is None:
+        return {"items": [], "count": 0, "error": err, "updated": int(time.time())}
+    marks = _read_aizc_marks()
+    items = [_aizc_item(r, marks) for r in rows]
+    return {"items": items, "count": len(items), "error": err or None, "updated": int(time.time())}
+
+
+@app.get("/api/aizc/article")
+async def api_aizc_article(sn: str):
+    """单篇详情：正文+情报。拆解时按需取，保证拿到的是同步过来的最新正文。"""
+    rows, err = _read_aizc_rows()
+    if rows is None:
+        raise HTTPException(404, err or "Aizc_pick.csv 不可读")
+    want = (sn or "").strip()
+    for r in rows:
+        if _wx_link_key(str(r.get("文章链接") or "")) == want:
+            item = _aizc_item(r, _read_aizc_marks())
+            item["body"] = str(r.get("正文") or "")
+            return {"item": item}
+    raise HTTPException(404, "未找到该文章（管道重跑后条目可能已更新，请刷新爆款库）")
+
+
+class AizcMarkItem(BaseModel):
+    sn: str
+    status: str
+    reason: str = ""
+
+
+@app.post("/api/aizc/mark")
+async def api_aizc_mark(req: AizcMarkItem):
+    """拆解进度标记：只写 Easel 自己的 _aizc_status.json，不动 CSV。"""
+    if req.status not in AIZC_STATUSES:
+        raise HTTPException(400, "status 取值须为 待拆/已拆/不拆")
+    sn = req.sn.strip()
+    if not sn:
+        raise HTTPException(400, "sn 不能为空")
+    marks = _read_aizc_marks()
+    marks[sn] = {"status": req.status, "reason": req.reason.strip(), "ts": int(time.time())}
+    _write_aizc_marks(marks)
+    return {"ok": True, "sn": sn, "status": req.status}
+# ── Aizc 爆款库段结束 ──
+
+
 if __name__ == "__main__":
     import uvicorn
     from easel.runtime_env import web_environment

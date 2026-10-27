@@ -965,3 +965,32 @@ export function fetchAvailableModels(
     body: JSON.stringify({ baseUrl, key, protocol, slot, name }),
   });
 }
+
+// ── Aizc 爆款库（纯追加）──
+export interface AizcPickItem {
+  sn: string; title: string; account: string; publishTime: string;
+  reads: string; likes: string; url: string;
+  interactionRate: string; collectRate: string; reason: string;
+  articleGrade: string; accountGrade: string; subTrack: string;
+  status: string; hasBody: boolean;
+}
+
+export interface AizcPickList {
+  items: AizcPickItem[]; count: number; error?: string | null; updated: number;
+}
+
+export function fetchAizcPick(): Promise<AizcPickList> {
+  return request('/api/aizc/pick');
+}
+
+export function fetchAizcArticle(sn: string): Promise<{ item: AizcPickItem & { body: string } }> {
+  return request(`/api/aizc/article?sn=${encodeURIComponent(sn)}`);
+}
+
+export function markAizc(sn: string, status: string, reason = ''): Promise<{ ok: boolean }> {
+  return request('/api/aizc/mark', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sn, status, reason }),
+  });
+}
