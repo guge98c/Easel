@@ -8,20 +8,44 @@ interface TrendsPageProps {
 }
 
 const ALL_PLATFORMS: { key: string; label: string }[] = [
-  { key: 'weibo', label: '微博' },
-  { key: 'douyin', label: '抖音' },
-  { key: 'zhihu', label: '知乎' },
-  { key: 'bilibili', label: 'B站' },
-  { key: 'baidu', label: '百度' },
-  { key: 'toutiao', label: '头条' },
-  { key: 'ai', label: 'AI' },
-  { key: 'wool', label: '羊毛' },
-  { key: 'sideline', label: '副业' },
-  { key: 'media', label: '媒体' },
+  // 媒体
+  { key: 'tgm_bilibili',    label: 'B站' },
+  { key: 'tgm_douyin',      label: '抖音' },
+  { key: 'tgm_youtube',     label: 'YouTube' },
+  // 羊毛（豆瓣组）
+  { key: 'tgm_maizu',       label: '豆瓣组·买' },
+  { key: 'tgm_pinzu',       label: '豆瓣组·拼' },
+  { key: 'tgm_aimao',       label: '豆瓣组·爱猫生活' },
+  { key: 'tgm_zaopen',      label: '豆瓣组·爱猫澡盆' },
+  // 副业
+  { key: 'tgm_2libra_fuye', label: '2Libra·副业' },
+  { key: 'tgm_v2ex_fuye',   label: 'V2EX·副业' },
+  { key: 'tgm_midfun_fuye', label: 'MiddleFun·副业' },
+  { key: 'tgm_woshipm_cy',  label: '人人都是产品经理·创业学院' },
+  { key: 'tgm_woshipm_yx',  label: '人人都是产品经理·营销推广' },
+  { key: 'tgm_lipusiwei',   label: '离谱思维' },
+  // AI
+  { key: 'tgm_agjj',        label: 'AI工具集·快讯' },
+  { key: 'tgm_aihub',       label: 'AIHub·资讯' },
+  { key: 'tgm_36keai',      label: '36氪·AI' },
+  { key: 'tgm_aitnt',       label: 'AITNT·AI' },
+  { key: 'tgm_taimei',      label: '钛媒体·AI' },
+  { key: 'tgm_oschina',     label: 'OSChina·AI' },
+  { key: 'tgm_hyper',       label: 'Hyper·AI' },
+  { key: 'tgm_appinn',      label: 'Appinn·AI' },
+  { key: 'tgm_2libra_ai',   label: '2Libra·AI' },
+  // GitHub
+  { key: 'tgm_gh_daily',    label: 'GitHub·Trending今日' },
+  { key: 'tgm_gh_weekly',   label: 'GitHub·Trending本周' },
+  { key: 'tgm_gh_day',      label: 'GitHub·新仓库日Star' },
+  { key: 'tgm_gh_all',      label: 'GitHub·Star总榜' },
+  // 糖果指数
+  { key: 'tgm_dubang',      label: '糖果梦·毒榜' },
+  { key: 'tgm_tg_sideline', label: '糖果梦·副业' },
 ];
 
 export default function TrendsPage({ onUseTopic }: TrendsPageProps) {
-  const [selected, setSelected] = useState<string[]>(['weibo', 'douyin', 'zhihu']);
+  const [selected, setSelected] = useState<string[]>(['tgm_maizu', 'tgm_aimao', 'tgm_agjj', 'tgm_gh_daily']);
   const [groups, setGroups] = useState<TrendGroup[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -40,7 +64,7 @@ export default function TrendsPage({ onUseTopic }: TrendsPageProps) {
     if (pfs.length === 0) { setGroups([]); return; }
     setLoading(true);
     setError('');
-    fetchTrends(pfs.join(','), 15)
+    fetchTrends(pfs.join(','), 100)
       .then((d) => { setGroups(d.trends); setUpdated(d.updated); })
       .catch(() => setError('热点拉取失败——请确认已配置外网代理（EASEL_PROXY）。'))
       .finally(() => setLoading(false));
