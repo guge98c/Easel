@@ -5369,12 +5369,42 @@ TREND_LABELS = {
     "baidu": "百度",
     "toutiao": "头条",
 }
-# 糖果梦分类栏目（公开 API，无需 license；与六平台独立）
-TGMENG_CATEGORIES: dict[str, dict[str, str]] = {
-    "ai": {"slug": "ai", "label": "AI"},
-    "wool": {"slug": "wool", "label": "羊毛"},
-    "sideline": {"slug": "sideline", "label": "副业"},
-    "media": {"slug": "media", "label": "媒体"},
+# 糖果梦热榜源（公开 API，无需 license；base=trend 走 trendapi，base=ai 走 aischedule）
+TGMENG_SOURCES: dict[str, dict[str, str]] = {
+    # 媒体
+    "tgm_bilibili":     {"base": "trend", "path": "bilibili",                 "label": "糖果梦·B站"},
+    "tgm_douyin":       {"base": "trend", "path": "douyin",                   "label": "糖果梦·抖音"},
+    "tgm_youtube":      {"base": "trend", "path": "global/youtube",            "label": "糖果梦·YouTube"},
+    # 羊毛（豆瓣组）
+    "tgm_maizu":        {"base": "trend", "path": "xiaozudouban/maizu",       "label": "豆瓣组·买"},
+    "tgm_pinzu":        {"base": "trend", "path": "xiaozudouban/pinzu",       "label": "豆瓣组·拼"},
+    "tgm_aimao":        {"base": "trend", "path": "xiaozudouban/aimaoshenghuo", "label": "豆瓣组·爱猫生活"},
+    "tgm_zaopen":       {"base": "trend", "path": "xiaozudouban/aimaozaopen", "label": "豆瓣组·爱猫澡盆"},
+    # 副业
+    "tgm_2libra_fuye":  {"base": "trend", "path": "2libra/fuye",              "label": "2Libra·副业"},
+    "tgm_v2ex_fuye":    {"base": "trend", "path": "v2ex/fuye",                "label": "V2EX·副业"},
+    "tgm_midfun_fuye":  {"base": "trend", "path": "middlefun/fuye",            "label": "MiddleFun·副业"},
+    "tgm_woshipm_cy":   {"base": "trend", "path": "woshipm/chuangyexueyuan", "label": "人人都是产品经理·创业学院"},
+    "tgm_woshipm_yx":   {"base": "trend", "path": "woshipm/yingxiaotuiguang", "label": "人人都是产品经理·营销推广"},
+    "tgm_lipusiwei":    {"base": "trend", "path": "lipusiwei",                "label": "离谱思维"},
+    # AI
+    "tgm_agjj":         {"base": "trend", "path": "aigongjujikuaixun",        "label": "AI工具集·快讯"},
+    "tgm_aihub":        {"base": "trend", "path": "aihubzixun",               "label": "AIHub·资讯"},
+    "tgm_36keai":       {"base": "trend", "path": "36keai",                   "label": "36氪·AI"},
+    "tgm_aitnt":        {"base": "trend", "path": "aitntzixun",               "label": "AITNT·AI"},
+    "tgm_taimei":       {"base": "trend", "path": "taimeitiai",               "label": "钛媒体·AI"},
+    "tgm_oschina":      {"base": "trend", "path": "oschinaai",                "label": "OSChina·AI"},
+    "tgm_hyper":        {"base": "trend", "path": "hyperai",                  "label": "Hyper·AI"},
+    "tgm_appinn":       {"base": "trend", "path": "appinn/ai",                "label": "Appinn·AI"},
+    "tgm_2libra_ai":    {"base": "trend", "path": "2libra/ai",                "label": "2Libra·AI"},
+    # GitHub
+    "tgm_gh_daily":     {"base": "trend", "path": "github/trending/daily",    "label": "GitHub·Trending今日"},
+    "tgm_gh_weekly":    {"base": "trend", "path": "github/trending/weekly",   "label": "GitHub·Trending本周"},
+    "tgm_gh_day":       {"base": "trend", "path": "github/stars/day",         "label": "GitHub·新仓库日Star"},
+    "tgm_gh_all":       {"base": "trend", "path": "github/stars/all",         "label": "GitHub·Star总榜"},
+    # 糖果指数（aischedule 域名）
+    "tgm_dubang":       {"base": "ai",    "path": "dubang",                   "label": "糖果梦·毒榜"},
+    "tgm_tg_sideline":  {"base": "ai",    "path": "sideline",                 "label": "糖果梦·副业"},
 }
 _TREND_CACHE: dict[str, tuple[float, list]] = {}
 _HOT_TITLE_KEYS = ("title", "Title", "word", "name", "keyword")
@@ -5446,43 +5476,35 @@ def _fetch_platform(pf: str) -> list[dict]:
     return []
 
 
-def _fetch_tgmeng(cat_key: str) -> list[dict]:
-    cfg = TGMENG_CATEGORIES.get(cat_key)
+def _fetch_tgmeng(source_key: str) -> list[dict]:
+    cfg = TGMENG_SOURCES.get(source_key)
     if not cfg:
         return []
-    body = json.dumps({
-        "license": "BVJQ-QTM2-Y8D5-BS09-9BDM-7BH2",
-        "mode": "REALTIME",
-        "rootCategories": [cfg["label"]],
-        "limit": 15,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://trendapi.tgmeng.com/api/skill/search",
-        data=body,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-        method="POST",
-    )
+    base = ("https://trendapi.tgmeng.com/api/topsearch/" if cfg["base"] == "trend"
+            else "https://aischedule.tgmeng.com/api/ai/tgmenghotsearch/")
+    url = base + cfg["path"]
     try:
-        with urllib.request.urlopen(req, timeout=12) as r:
-            payload = json.loads(r.read().decode("utf-8", "replace"))
+        payload = _http_get_json(url, timeout=10)
     except Exception:
         return []
-    rows = (payload.get("data") or {}).get("items") if isinstance(payload, dict) else None
+    rows = (payload.get("data") or {}).get("dataInfo") if isinstance(payload, dict) else None
     out: list[dict] = []
     if isinstance(rows, list):
-        for it in rows[:15]:
+        for it in rows:
             if not isinstance(it, dict):
                 continue
             title = it.get("title")
             if not title or not isinstance(title, str):
                 continue
-            out.append({"title": title.strip(), "hot": "", "url": it.get("url") or ""})
+            hot = it.get("hotScore")
+            hot_s = str(hot) if hot else ""
+            out.append({"title": title.strip(), "hot": hot_s, "url": it.get("url") or ""})
     return out
 
 
 @app.get("/api/trends")
 async def api_trends(platforms: str = "weibo,douyin,zhihu", limit: int = 12):
-    pfs = [p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES or p.strip() in TGMENG_CATEGORIES]
+    pfs = [p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES or p.strip() in TGMENG_SOURCES]
     now = time.time()
     loop = asyncio.get_event_loop()
     result = []
@@ -5491,7 +5513,7 @@ async def api_trends(platforms: str = "weibo,douyin,zhihu", limit: int = 12):
         if c and now - c[0] < 300:
             items = c[1]
         else:
-            if pf in TGMENG_CATEGORIES:
+            if pf in TGMENG_SOURCES:
                 items = await loop.run_in_executor(None, _fetch_tgmeng, pf)
             else:
                 items = await loop.run_in_executor(None, _fetch_platform, pf)
@@ -5499,10 +5521,15 @@ async def api_trends(platforms: str = "weibo,douyin,zhihu", limit: int = 12):
                 _TREND_CACHE[pf] = (now, items)
             elif c:
                 items = c[1]
+        # 糖果梦源不截断（每端点 50 条全量展示）；官方源按 limit 截断到 30
+        if pf in TGMENG_SOURCES:
+            sliced = items
+        else:
+            sliced = items[:max(1, min(limit, 30))]
         result.append({
             "platform": pf,
-            "label": TREND_LABELS.get(pf) or TGMENG_CATEGORIES.get(pf, {}).get("label") or pf,
-            "items": items[:max(1, min(limit, 30))],
+            "label": TREND_LABELS.get(pf) or TGMENG_SOURCES.get(pf, {}).get("label") or pf,
+            "items": sliced,
             "ok": bool(items),
         })
     return {"trends": result, "updated": int(now)}
