@@ -525,10 +525,12 @@ AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """应用生命周期：关机时回收公众号扫码进程（替代已弃用的 on_event）。"""
+    """应用生命周期：启动/回收爆款库自动拆解任务与公众号扫码进程（替代已弃用的 on_event）。"""
     global _HARNESS_LOOP
     _HARNESS_LOOP = asyncio.get_running_loop()
+    _start_aizc_auto()   # 启动后台自动拆解（定义见 Aizc 爆款库段）
     yield
+    _stop_aizc_auto()
     tasks = list(_HARNESS_TASKS)
     for task in tasks:
         task.cancel()
@@ -5746,7 +5748,7 @@ import csv  # noqa: E402  纯追加段自带依赖，避免改头部导入区
 AIZC_DIR = Path(os.environ.get("AIZC_PICK_DIR") or (OUTPUTS_DIR / "aizc"))
 AIZC_PICK_FILE = AIZC_DIR / "Aizc_pick.csv"
 AIZC_STATUS_FILE = OUTPUTS_DIR / "_aizc_status.json"
-AIZC_STATUSES = {"待拆", "已拆", "不拆"}
+AIZC_STATUSES = {"待拆", "拆解中", "已拆", "不拆", "拆解失败"}
 _AIZC_CACHE: dict = {"mtime": None, "rows": None, "error": ""}
 
 
@@ -5868,6 +5870,262 @@ async def api_aizc_mark(req: AizcMarkItem):
     marks[sn] = {"status": req.status, "reason": req.reason.strip(), "ts": int(time.time())}
     _write_aizc_marks(marks)
     return {"ok": True, "sn": sn, "status": req.status}
+
+
+# ── 自动拆解（2026-10-28 追加）──────────────────────────────
+# 后台轮询 Aizc_pick.csv：发现「待拆」→ 串行拆解 → ①报告落 outputs/拆解/{日期}/{标题}.md
+# （agent 工作区内，对话时 AI 可读）②提炼 3 个选题入 _ideas.json 选题库 ③自动标记已拆。
+# 失败自动标记「拆解失败」并按 _AIZC_RETRY_GAP 退避重试（限流/超时同路径）。
+AIZC_OUT_DIR = OUTPUTS_DIR / "拆解"
+_AIZC_AUTO_TASK: asyncio.Task | None = None   # 后台主循环任务
+_AIZC_WAKE = asyncio.Event()                  # 手动触发唤醒（/api/aizc/auto）
+_AIZC_BUSY = asyncio.Lock()                   # 串行锁：同时只拆一篇，降低限流冲击
+_AIZC_RUNNING = False                         # 本轮扫描是否在跑（API 状态用）
+_AIZC_CURRENT: dict = {}                      # 正在拆解的条目（sn/title）
+_AIZC_LAST_SCAN = 0                           # 上次扫描时间戳
+_AIZC_MAX_RETRY = 3                           # 单篇最大重试次数
+_AIZC_RETRY_GAP = 180                         # 失败后重试间隔（秒）
+
+
+def _aizc_mark(sn: str, status: str, reason: str = "") -> None:
+    """写一条进度标记（自动拆解专用：带重试计数）。"""
+    marks = _read_aizc_marks()
+    prev = marks.get(sn) if isinstance(marks.get(sn), dict) else {}
+    marks[sn] = {
+        "status": status,
+        "reason": reason,
+        "ts": int(time.time()),
+        "retry": int(prev.get("retry") or 0) + (1 if status == "拆解失败" else 0),
+    }
+    _write_aizc_marks(marks)
+
+
+def _aizc_build_prompt(item: dict, body: str) -> str:
+    """自动拆解提示词：与前端拆解页模板一致，末尾追加结构化选题清单区间。"""
+    account = item.get("account") or ""
+    intel = (f"【爆款情报卡】账号：{account}" +
+             (f"（账号档位 {item.get('accountGrade')}）" if item.get("accountGrade") else "") +
+             (f"｜文章档位 {item.get('articleGrade')}" if item.get("articleGrade") else "") +
+             f"｜爆因：{item.get('reason') or '未标注'}" +
+             (f"｜互动率 {item.get('interactionRate')}" if item.get("interactionRate") else "") +
+             (f"｜收藏率 {item.get('collectRate')}" if item.get("collectRate") else "") +
+             (f"｜阅读 {item.get('reads')}" if item.get("reads") else "") +
+             (f"｜发布 {item.get('publishTime')}" if item.get("publishTime") else "") + "\n")
+    return (
+        "你是爆款内容拆解专家。拆解下面这条内容，用中文分点输出：\n"
+        "1. **一句话概括**\n"
+        "2. **钩子拆解**：开头为什么抓人\n"
+        "3. **结构套路**：分段/节奏/信息编排\n"
+        "4. **为什么会火**：情绪/共鸣/实用/争议点（结合上方情报卡的爆因与互动数据）\n"
+        "5. **可复制模板**：把套路抽象成我能直接套用的结构框架\n"
+        "6. **借这个套路可做的 3 个选题**\n\n"
+        f"{intel}待拆解内容：\n{body}\n\n"
+        "最后另起一行输出选题清单，格式严格如下（不要代码块、不要其他文字）：\n"
+        "=====选题清单START=====\n"
+        "1. 选题一标题｜一句话要点\n"
+        "2. 选题二标题｜一句话要点\n"
+        "3. 选题三标题｜一句话要点\n"
+        "=====选题清单END====="
+    )
+
+
+def _aizc_save_report(item: dict, result: str) -> Path:
+    """拆解报告落库 outputs/拆解/{日期}/{标题}.md（agent 工作区内，AI 可读、前端内容库可见）。"""
+    day = time.strftime("%Y-%m-%d")
+    d = AIZC_OUT_DIR / day
+    d.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r'[\\/:*?"<>|\s]+', '_', (item.get("title") or "未命名")).strip("_")[:60] or "未命名"
+    path = d / f"{safe}.md"
+    n = 2
+    while path.exists():
+        path = d / f"{safe}-{n}.md"
+        n += 1
+    head = (
+        f"# 拆解报告：{item.get('title') or ''}\n\n"
+        f"- 账号：{item.get('account') or ''} ｜ 发布：{item.get('publishTime') or ''} ｜ "
+        f"爆因：{item.get('reason') or ''} ｜ 互动率：{item.get('interactionRate') or ''} ｜ "
+        f"收藏率：{item.get('collectRate') or ''} ｜ 阅读：{item.get('reads') or ''}\n"
+        f"- 文章档位：{item.get('articleGrade') or ''} ｜ 账号档位：{item.get('accountGrade') or ''} ｜ "
+        f"子赛道：{item.get('subTrack') or ''}\n"
+        f"- 原文链接：{item.get('url') or ''}\n"
+        f"- 拆解时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"- 拆解引擎：Easel 自动拆解（opencode harness）\n\n"
+        "---\n\n## 拆解结果\n\n"
+    )
+    path.write_text(head + result.strip() + "\n", encoding="utf-8")
+    return path
+
+
+def _aizc_extract_ideas(result: str, item: dict) -> list[dict]:
+    """从拆解结果解析选题清单区间，每行 `N. 标题｜要点`，最多 3 条入 _ideas.json。"""
+    m = re.search(r"=====选题清单START=====(.*?)=====选题清单END=====", result, re.S)
+    if not m:
+        return []
+    ideas = []
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        m2 = re.match(r"^\d+[\.、]\s*(.+?)(?:\s*[｜|]\s*(.*))?$", line)
+        if not m2:
+            continue
+        title = re.sub(r"^[【\[]|[】\]]$", "", m2.group(1).strip()).strip()
+        note = (m2.group(2) or "").strip()
+        if not title or title.startswith("====="):
+            continue
+        ideas.append({
+            "title": title[:60],
+            "note": (f"{note[:120]}\n" if note else "") +
+                    f"来源拆解：{item.get('account') or ''}《{(item.get('title') or '')[:40]}》",
+            "source": f"Aizc自动拆解-{item.get('account') or '未知账号'}",
+            "status": "pending",
+        })
+        if len(ideas) >= 3:
+            break
+    return ideas
+
+
+async def _aizc_run_one(prompt: str) -> str:
+    """用 harness（opencode）跑一次拆解，返回结果文本；错误抛 RuntimeError。
+    复用 _run_harness_chat（interactive=False，无权限确认），每次全新会话不续接。"""
+    runtime = _harness_settings()["runtime"]
+    if runtime in ("api", "openclaw"):
+        raise RuntimeError(f"当前 runtime={runtime} 不支持后台自动拆解（需 opencode/原生 harness）")
+    sk = f"aizc-{uuid.uuid4().hex[:12]}"
+    request = ChatRequest(message=prompt, sessionId=sk)
+    errors = []
+
+    def emit(kind, text):
+        if kind == "error":
+            errors.append(text)
+
+    try:
+        result = await _run_harness_chat(request, sk, prompt, runtime, _harness_settings(), emit,
+                                         TIMEOUT_DIRECT, interactive=False)
+    except Exception as e:
+        raise RuntimeError(_scrub_secrets(str(e))[-300:]) from e
+    if errors:
+        raise RuntimeError(_scrub_secrets(errors[0])[-300:])
+    return result or "（无输出）"
+
+
+async def _aizc_process_one(item: dict) -> None:
+    """拆解单篇：报告落库 → 提炼选题入 _ideas.json → 标记已拆；失败标记拆解失败待重试。"""
+    sn = item["sn"]
+    _aizc_mark(sn, "拆解中", "自动拆解进行中")
+    body = str(item.get("body") or "")
+    if not body:
+        rows, _ = _read_aizc_rows()
+        for r in rows or []:
+            if _wx_link_key(str(r.get("文章链接") or "")) == sn:
+                body = str(r.get("正文") or "")
+                item["title"] = str(r.get("标题") or item.get("title") or "")
+                break
+    prompt = _aizc_build_prompt(item, body or "（该条目无正文，仅凭情报卡拆解）")
+    try:
+        result = await _aizc_run_one(prompt)
+    except Exception as e:
+        msg = str(e)
+        limited = any(k in msg.lower() for k in ("rpm", "tpm", "429", "quota", "exhaust", "rate limit", "限流"))
+        _aizc_mark(sn, "拆解失败", f"{'限流' if limited else '拆解错误'}：{msg[:120]}")
+        return
+    try:
+        path = _aizc_save_report(item, result)
+        ideas = _aizc_extract_ideas(result, item)
+        if ideas:
+            existing = _read_ideas()
+            existing[0:0] = ideas
+            _write_ideas(existing)
+        _aizc_mark(sn, "已拆", f"报告：{path.name}；提炼选题 {len(ideas)} 条")
+    except Exception as e:
+        _aizc_mark(sn, "拆解失败", f"落库失败：{str(e)[:120]}")
+
+
+async def _aizc_auto_tick() -> None:
+    """一轮扫描：找出应拆条目（待拆 / 失败待重试），串行拆解。"""
+    global _AIZC_RUNNING, _AIZC_LAST_SCAN
+    if _AIZC_BUSY.locked():
+        return
+    _AIZC_RUNNING = True
+    _AIZC_LAST_SCAN = int(time.time())
+    try:
+        rows, _ = _read_aizc_rows()
+        if rows is None:
+            return
+        marks = _read_aizc_marks()
+        now = int(time.time())
+        todo = []
+        for r in rows:
+            item = _aizc_item(r, marks)
+            st = item["status"]
+            if st == "待拆":
+                todo.append(item)
+            elif st == "拆解失败":
+                m = marks.get(item["sn"]) or {}
+                if int(m.get("retry") or 0) < _AIZC_MAX_RETRY and now - int(m.get("ts") or 0) >= _AIZC_RETRY_GAP:
+                    todo.append(item)
+        todo = [t for t in todo if marks.get(t["sn"], {}).get("status") != "拆解中"]
+        for item in todo:
+            async with _AIZC_BUSY:
+                _AIZC_CURRENT.update(sn=item["sn"], title=item["title"])
+                try:
+                    await _aizc_process_one(item)
+                except Exception as e:
+                    _aizc_mark(item["sn"], "拆解失败", f"未知错误：{str(e)[:120]}")
+                finally:
+                    _AIZC_CURRENT.clear()
+                    await asyncio.sleep(20)  # 串行间隔，降低限流冲击
+    finally:
+        _AIZC_RUNNING = False
+
+
+async def _aizc_auto_loop() -> None:
+    """后台主循环：60s 轮询 + 事件唤醒（/api/aizc/auto 立即触发）。"""
+    while True:
+        try:
+            await _aizc_auto_tick()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(_AIZC_WAKE.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
+        _AIZC_WAKE.clear()
+
+
+def _start_aizc_auto() -> None:
+    global _AIZC_AUTO_TASK
+    if _AIZC_AUTO_TASK is None or _AIZC_AUTO_TASK.done():
+        _AIZC_AUTO_TASK = asyncio.create_task(_aizc_auto_loop())
+
+
+def _stop_aizc_auto() -> None:
+    global _AIZC_AUTO_TASK
+    if _AIZC_AUTO_TASK is not None:
+        _AIZC_AUTO_TASK.cancel()
+        _AIZC_AUTO_TASK = None
+
+
+@app.post("/api/aizc/auto")
+async def api_aizc_auto_trigger():
+    """手动触发一轮自动拆解（立即唤醒，不等 60s 轮询）。"""
+    _AIZC_WAKE.set()
+    return {"ok": True, "message": "已唤醒自动拆解"}
+
+
+@app.get("/api/aizc/auto/status")
+async def api_aizc_auto_status():
+    rows, _ = _read_aizc_rows()
+    marks = _read_aizc_marks()
+    counts = {"待拆": 0, "拆解中": 0, "已拆": 0, "不拆": 0, "拆解失败": 0}
+    for r in rows or []:
+        st = _aizc_item(r, marks)["status"]
+        counts[st] = counts.get(st, 0) + 1
+    return {
+        "running": _AIZC_RUNNING,
+        "current": _AIZC_CURRENT,
+        "lastScan": _AIZC_LAST_SCAN,
+        "counts": counts,
+        "sleeping": _AIZC_AUTO_TASK is not None and not _AIZC_AUTO_TASK.done(),
+    }
 # ── Aizc 爆款库段结束 ──
 
 

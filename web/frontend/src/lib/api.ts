@@ -994,3 +994,20 @@ export function markAizc(sn: string, status: string, reason = ''): Promise<{ ok:
     body: JSON.stringify({ sn, status, reason }),
   });
 }
+
+// 自动拆解（2026-10-28 追加）：后台轮询待拆→串行拆解→报告落库+选题入库+自动标记已拆
+export interface AizcAutoStatus {
+  running: boolean;
+  current: { sn?: string; title?: string } | null;
+  lastScan: number;
+  counts: Record<string, number>;
+  sleeping: boolean;
+}
+
+export function triggerAizcAuto(): Promise<{ ok: boolean; message: string }> {
+  return request('/api/aizc/auto', { method: 'POST' });
+}
+
+export function fetchAizcAutoStatus(): Promise<AizcAutoStatus> {
+  return request('/api/aizc/auto/status');
+}

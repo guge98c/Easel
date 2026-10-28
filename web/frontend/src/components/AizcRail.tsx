@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchAizcPick, type AizcPickItem } from '../lib/api';
+import { fetchAizcPick, fetchAizcAutoStatus, triggerAizcAuto, type AizcPickItem, type AizcAutoStatus } from '../lib/api';
 import { IconFire } from './icons';
 
 interface AizcRailProps {
@@ -10,9 +10,19 @@ interface AizcRailProps {
 
 type StatusFilter = '待拆' | '已拆' | '全部';
 
+/** 状态标签：拆解中=蓝、失败=红、已拆/不拆=灰，其余默认。 */
+const STATUS_STYLE: Record<string, { color: string; label: string }> = {
+  '待拆': { color: 'var(--fg)', label: '待拆' },
+  '拆解中': { color: '#3b82f6', label: '拆解中' },
+  '拆解失败': { color: '#ef4444', label: '拆解失败' },
+  '已拆': { color: '#9ca3af', label: '已拆' },
+  '不拆': { color: '#9ca3af', label: '不拆' },
+};
+
 /** 爆款库左栏：Aizc_pick.csv 的货架（情报+进度），点一条把正文+情报喂给右侧拆解引擎。 */
 export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailProps) {
   const [items, setItems] = useState<AizcPickItem[]>([]);
+  const [auto, setAuto] = useState<AizcAutoStatus | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<StatusFilter>('待拆');
@@ -32,13 +42,38 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
     }
   };
 
-  useEffect(() => { load(); }, [refreshToken]);
+  const loadAuto = async () => {
+    try {
+      setAuto(await fetchAizcAutoStatus());
+    } catch { /* 状态接口失败不打断列表 */ }
+  };
+
+  // 刷新信号（手动标记/外部）触发一次全量刷新
+  useEffect(() => { load(); loadAuto(); }, [refreshToken]);
+
+  // 自动拆解运行中：8s 轮询状态与列表（拆解中→已拆 自动变化）
+  useEffect(() => {
+    if (!auto?.running && !auto?.current?.sn) return;
+    const t = window.setInterval(() => { load(); loadAuto(); }, 8000);
+    return () => window.clearInterval(t);
+  }, [auto?.running, auto?.current?.sn]);
+
+  const trigger = async () => {
+    try {
+      await triggerAizcAuto();
+      setTimeout(() => { loadAuto(); }, 1500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '触发自动拆解失败');
+    }
+  };
 
   const keyword = q.trim();
+  const inPending = (st: string) => st === '待拆' || st === '拆解中' || st === '拆解失败';
   const shown = items.filter(it =>
-    (filter === '全部' || it.status === filter) &&
+    (filter === '全部' || (filter === '待拆' ? inPending(it.status) : (it.status === '已拆' || it.status === '不拆'))) &&
     (!keyword || (it.title + it.account + it.reason).includes(keyword)));
-  const pending = items.filter(it => it.status === '待拆').length;
+  const pending = items.filter(it => inPending(it.status)).length;
+  const running = auto?.running || !!auto?.current?.sn;
 
   return (
     <div style={{ width: 300, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '72vh', overflowY: 'auto' }}>
@@ -47,6 +82,25 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
         <span style={{ fontSize: 12, opacity: 0.7 }}>待拆 {pending}</span>
         <button className="btn btn-ghost" style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: 12 }}
           onClick={load} title="重新读取 Aizc_pick.csv">↻ 刷新</button>
+      </div>
+      {/* 自动拆解状态条 */}
+      <div className="panel" style={{ padding: '8px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+        {running ? (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
+            <span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#3b82f6' }}>
+              拆解中：{auto?.current?.title || '…'}
+            </span>
+          </span>
+        ) : (
+          <span style={{ flex: 1, minWidth: 0, opacity: 0.8 }}>
+            自动拆解{auto?.sleeping === false ? '未启动' : '待命中'}
+            {(auto?.counts?.['拆解失败'] || 0) > 0 ? `，失败 ${auto.counts['拆解失败']} 篇待重试` : ''}
+          </span>
+        )}
+        <button className="btn" style={{ padding: '2px 10px', fontSize: 12, flexShrink: 0 }} onClick={trigger} disabled={running}>
+          {running ? '…' : '立即拆解'}
+        </button>
       </div>
       <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
         {(['待拆', '已拆', '全部'] as StatusFilter[]).map(f => (
@@ -70,24 +124,27 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
           暂无条目。跑完管道、等目录同步后点「刷新」。
         </div>
       )}
-      {!loading && shown.map(it => (
-        <button key={it.sn || it.url} className="panel" onClick={() => onPick(it)}
-          style={{ textAlign: 'left', padding: 8, cursor: 'pointer',
-            border: activeSn === it.sn ? '1.5px solid currentColor' : undefined }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.35, marginBottom: 4 }}>{it.title}</div>
-          <div style={{ fontSize: 11.5, opacity: 0.75, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            <span>{it.account}</span>
-            {it.articleGrade && <span>文章{it.articleGrade}</span>}
-            {it.accountGrade && <span>账号{it.accountGrade}</span>}
-            {it.reason && <span>{it.reason}</span>}
-            {it.interactionRate && <span>互动{it.interactionRate}</span>}
-            {it.collectRate && <span>收藏{it.collectRate}</span>}
-          </div>
-          <div style={{ fontSize: 11, marginTop: 4, opacity: 0.85 }}>
-            {it.status}{it.hasBody ? '' : '（无正文）'}
-          </div>
-        </button>
-      ))}
+      {!loading && shown.map(it => {
+        const st = STATUS_STYLE[it.status] || { color: 'var(--fg)', label: it.status };
+        return (
+          <button key={it.sn || it.url} className="panel" onClick={() => onPick(it)}
+            style={{ textAlign: 'left', padding: 8, cursor: 'pointer',
+              border: activeSn === it.sn ? '1.5px solid currentColor' : undefined }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.35, marginBottom: 4 }}>{it.title}</div>
+            <div style={{ fontSize: 11.5, opacity: 0.75, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              <span>{it.account}</span>
+              {it.articleGrade && <span>文章{it.articleGrade}</span>}
+              {it.accountGrade && <span>账号{it.accountGrade}</span>}
+              {it.reason && <span>{it.reason}</span>}
+              {it.interactionRate && <span>互动{it.interactionRate}</span>}
+              {it.collectRate && <span>收藏{it.collectRate}</span>}
+            </div>
+            <div style={{ fontSize: 11, marginTop: 4, color: st.color }}>
+              {st.label}{it.hasBody ? '' : '（无正文）'}
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 }
