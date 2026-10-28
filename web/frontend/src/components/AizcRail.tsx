@@ -74,6 +74,7 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
     (!keyword || (it.title + it.account + it.reason).includes(keyword)));
   const pending = items.filter(it => inPending(it.status)).length;
   const running = auto?.running || !!auto?.current?.sn;
+  const failCount = auto?.counts?.['拆解失败'] || 0;
 
   return (
     <div style={{ width: 300, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '72vh', overflowY: 'auto' }}>
@@ -95,7 +96,7 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
         ) : (
           <span style={{ flex: 1, minWidth: 0, opacity: 0.8 }}>
             自动拆解{auto?.sleeping === false ? '未启动' : '待命中'}
-            {(auto?.counts?.['拆解失败'] || 0) > 0 ? `，失败 ${auto.counts['拆解失败']} 篇待重试` : ''}
+            {failCount > 0 ? `，失败 ${failCount} 篇待重试` : ''}
           </span>
         )}
         <button className="btn" style={{ padding: '2px 10px', fontSize: 12, flexShrink: 0 }} onClick={trigger} disabled={running}>
