@@ -5972,6 +5972,7 @@ def _aizc_extract_ideas(result: str, item: dict) -> list[dict]:
         if not title or title.startswith("====="):
             continue
         ideas.append({
+            "id": uuid.uuid4().hex[:12],
             "title": title[:60],
             "note": (f"{note[:120]}\n" if note else "") +
                     f"来源拆解：{item.get('account') or ''}《{(item.get('title') or '')[:40]}》",
