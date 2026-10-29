@@ -8,15 +8,21 @@
 #   npm=registry.npmjs.org / pip=pypi.org / playwright=官方CDN / apt=debian 官方
 # 构建产物推 ghcr.io/guge98c/easel（由 .github/workflows/build-and-push.yml 驱动）
 #
-# ⚠ 层顺序纪律（2026-10-29 修复，勿回退）：
-#   依赖层（venv / playwright / npm -g）必须排在源码 COPY 之前。
-#   旧版把 COPY . . 放在依赖层前，改一行代码就导致 ~5GB 依赖层缓存全部失效，
-#   NAS 端 docker pull 退化为"拉半个镜像"（GB 级下载），曾把 NAS 拖崩。
-#   依赖版本双保险：requirements.txt 锁 pip 依赖，npm -g 锁死版本号（禁 @latest）。
+# ⚠ 层稳定纪律（2026-10-29，勿回退）：
+#   目标：任何构建路径（custom 分支 push / 上游 merge）产出的镜像，
+#   在业务代码之外的层 digest 不变 → NAS 端 docker pull 恒为增量（几十 MB）。
+#   三道锁，缺一不可：
+#   ① 层顺序：依赖层（venv / playwright / npm -g）必须排在源码 COPY 之前。
+#      旧版把 COPY . . 放在依赖层前，改一行代码就导致 ~5GB 依赖层缓存全部失效，
+#      NAS 端 docker pull 退化为"拉半个镜像"（GB 级下载），曾把 NAS 拖崩。
+#   ② 版本锁定：requirements.txt 锁 pip（123 包）、npm -g 锁死版本号（禁 @latest）、
+#      apt 锁 `=版本`、FROM 锁 digest（禁浮动 tag，官方安全更新不自动进，
+#      需主动 bump：docker pull node:24-bookworm-slim 后更新两处 digest）。
+#   ③ 上游作者改代码（requirements/package.json 除外）→ 只有源码层变 → 增量拉取成立。
 # ============================================================
 
 # ---- Stage 1: 构建 Web 前端（React production bundle） ----
-FROM node:24-bookworm-slim AS frontend-builder
+FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS frontend-builder
 WORKDIR /src
 COPY web/frontend/package.json web/frontend/package-lock.json* ./
 RUN npm ci --registry https://registry.npmjs.org --no-audit --no-fund \
@@ -26,14 +32,16 @@ RUN npm run build
 # 产物: /src/dist
 
 # ---- Stage 2: 运行时 ----
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 系统依赖: Python 3.11 工具链 + FFmpeg + Git + 浏览器运行库（Playwright 依赖列表）
+# 版本锁定（2026-10-29，deb12 当前候选）：防 bookworm 安全更新导致 apt 层 digest 漂移 → 上层全失效
+# 升级方式：容器内 apt-get update && apt-cache policy <包> 查新版本后手动 bump
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    ffmpeg git curl ca-certificates \
-    build-essential \
+    python3=3.11.2-1+b1 python3-pip=23.0.1+dfsg-1 python3-venv=3.11.2-1+b1 \
+    ffmpeg=7:5.1.9-0+deb12u1 git=1:2.39.5-0+deb12u3 curl=7.88.1-10+deb12u15 \
+    ca-certificates=20250419~deb12u2 build-essential=12.9 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

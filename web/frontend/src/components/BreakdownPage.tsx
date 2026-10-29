@@ -1,12 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   runAgent, createIdea, fetchAizcArticle, markAizc,
-  fetchMaterialTitles, fetchMaterialSnippets, fetchMaterialStats, ingestMaterials,
-  type AizcPickItem, type TitleItem, type SnippetItem, type MaterialStats,
+  type AizcPickItem,
 } from '../lib/api';
 import { renderMarkdown } from '../lib/sanitize';
 import { IconFire, IconIdea, IconSkills } from './icons';
 import AizcRail from './AizcRail';
+import MaterialsPanel from './MaterialsPanel';
 
 interface BreakdownPageProps {
   persona: string;
@@ -92,52 +92,6 @@ export default function BreakdownPage({ persona }: BreakdownPageProps) {
     }
   };
 
-  // ── 素材库（标题库 + 金句/切片库）：拆解副产品，自动归档，可筛选 ──
-  const [titles, setTitles] = useState<TitleItem[]>([]);
-  const [snippets, setSnippets] = useState<SnippetItem[]>([]);
-  const [stats, setStats] = useState<MaterialStats | null>(null);
-  const [tQuery, setTQuery] = useState('');
-  const [tFormula, setTFormula] = useState('');
-  const [sQuery, setSQuery] = useState('');
-  const [sType, setSType] = useState('');
-  const [matLoading, setMatLoading] = useState(false);
-  const [ingesting, setIngesting] = useState(false);
-
-  const loadMaterials = async () => {
-    setMatLoading(true);
-    try {
-      const [t, s, st] = await Promise.all([
-        fetchMaterialTitles(tQuery, tFormula),
-        fetchMaterialSnippets(sQuery, sType),
-        fetchMaterialStats(),
-      ]);
-      setTitles(t.items); setSnippets(s.items); setStats(st);
-    } catch {
-      /* 素材库读失败不打断拆解主流程 */
-    } finally {
-      setMatLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadMaterials();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tQuery, tFormula, sQuery, sType]);
-
-  const runIngest = async () => {
-    setIngesting(true);
-    try {
-      const r = await ingestMaterials();
-      await loadMaterials();
-      setToast(`已补录 ${r.reports} 份报告（标题 +${r.titles} / 切片 +${r.snippets}）`);
-    } catch (e) {
-      setToast(e instanceof Error ? e.message : '补录失败');
-    } finally {
-      setIngesting(false);
-      setTimeout(() => setToast(''), 2600);
-    }
-  };
-
   return (
     <div className="page-scroll breakdown-page">
       <div className="page-head">
@@ -174,72 +128,7 @@ export default function BreakdownPage({ persona }: BreakdownPageProps) {
         </div>
       </div>
 
-      {/* 素材库：标题库 + 金句/切片库（拆解副产品，行业素材分层） */}
-      <div className="panel" style={{ marginTop: 18 }}>
-        <div className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
-          <span><IconIdea size={14} /> 素材库（拆解自动归档）{matLoading && <span style={{ color: '#6b7280', fontSize: 11 }}> 刷新中…</span>}</span>
-          <span style={{ display: 'flex', gap: 6 }}>
-            <button className="btn btn-ghost" onClick={loadMaterials} disabled={matLoading}>刷新</button>
-            <button className="btn btn-ghost" onClick={runIngest} disabled={ingesting}>{ingesting ? '补录中…' : '补录历史报告'}</button>
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-          {/* 标题库 */}
-          <div style={{ flex: 1, minWidth: 300 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>标题库（{stats?.titles_total ?? 0}）</div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <input className="field" placeholder="搜标题…" value={tQuery} onChange={e => setTQuery(e.target.value)} style={{ flex: 1 }} />
-              <select className="field" value={tFormula} onChange={e => setTFormula(e.target.value)} style={{ width: 116 }}>
-                <option value="">全部公式</option>
-                {Object.entries(stats?.title_formulas || {}).map(([k, v]) => (
-                  <option key={k} value={k}>{k}({v})</option>
-                ))}
-              </select>
-            </div>
-            {titles.length === 0 ? (
-              <div style={{ color: '#6b7280', fontSize: 12.5, padding: '8px 2px' }}>暂无标题（拆解完成后自动入库，可点「补录历史报告」）</div>
-            ) : (
-              <div style={{ maxHeight: 320, overflow: 'auto' }}>
-                {titles.map(t => (
-                  <div key={t.id} style={{ borderBottom: '1px solid #f3f4f6', padding: '6px 2px', fontSize: 12.5 }}>
-                    <div style={{ fontWeight: 600 }}>{t.title}</div>
-                    <div style={{ color: '#6b7280', marginTop: 1 }}>
-                      <span style={{ background: '#fff7ed', borderRadius: 6, padding: '0 6px', fontSize: 11, color: '#c2410c' }}>{t.formula}</span>
-                      {' '}{t.account}{t.reads ? `｜阅读 ${t.reads}` : ''}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          {/* 金句/切片库 */}
-          <div style={{ flex: 1, minWidth: 300 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>金句/切片库（{stats?.snippets_total ?? 0}）</div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <input className="field" placeholder="搜切片…" value={sQuery} onChange={e => setSQuery(e.target.value)} style={{ flex: 1 }} />
-              <select className="field" value={sType} onChange={e => setSType(e.target.value)} style={{ width: 116 }}>
-                <option value="">全部类型</option>
-                {Object.entries(stats?.snippet_types || {}).map(([k, v]) => (
-                  <option key={k} value={k}>{k}({v})</option>
-                ))}
-              </select>
-            </div>
-            {snippets.length === 0 ? (
-              <div style={{ color: '#6b7280', fontSize: 12.5, padding: '8px 2px' }}>暂无切片（拆解完成后自动入库）</div>
-            ) : (
-              <div style={{ maxHeight: 320, overflow: 'auto' }}>
-                {snippets.map(s => (
-                  <div key={s.id} style={{ borderBottom: '1px solid #f3f4f6', padding: '6px 2px', fontSize: 12.5 }}>
-                    <span style={{ background: '#eef2ff', borderRadius: 6, padding: '0 6px', fontSize: 11, color: '#4338ca' }}>{s.type}</span>{' '}
-                    <span>{s.content}</span>
-                    <div style={{ color: '#6b7280', marginTop: 2, fontSize: 11.5 }}>来源：{s.source_title || s.account}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      <MaterialsPanel />
 
       {toast && <div className="toast ok"><span className="toast-icon">✓</span>{toast}</div>}
     </div>
