@@ -1,6 +1,6 @@
 import type { Page } from './Sidebar';
 import type { ComponentType } from 'react';
-import { IconDashboard, IconFire, IconIdea, IconCalendar, IconPublish, IconSkills } from './icons';
+import { IconDashboard, IconFire, IconIdea, IconCalendar, IconPublish, IconSkills, IconLayers } from './icons';
 
 interface SubNavProps {
   current: Page;
@@ -13,6 +13,7 @@ const TOOLS: { page: Page; Icon: ComponentType<{ size?: number }>; label: string
   { page: 'calendar', Icon: IconCalendar, label: '内容日历' },
   { page: 'publish', Icon: IconPublish, label: '发布中心' },
   { page: 'breakdown', Icon: IconSkills, label: '爆款拆解' },
+  { page: 'materials', Icon: IconLayers, label: '素材库' },
 ];
 
 export default function SubNav({ current, onNavigate }: SubNavProps) {

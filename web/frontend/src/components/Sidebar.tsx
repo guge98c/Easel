@@ -10,7 +10,7 @@ import {
 import { IconGear } from './settingsIcons';
 import ThemeToggle from './ThemeToggle';
 
-export type Page = 'dashboard' | 'chat' | 'trends' | 'ideas' | 'calendar' | 'publish' | 'breakdown' | 'skills' | 'outputs' | 'accounts' | 'profile';
+export type Page = 'dashboard' | 'chat' | 'trends' | 'ideas' | 'calendar' | 'publish' | 'breakdown' | 'materials' | 'skills' | 'outputs' | 'accounts' | 'profile';
 
 interface SidebarProps {
   currentPage: Page;

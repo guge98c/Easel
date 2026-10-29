@@ -6,7 +6,6 @@ import {
 import { renderMarkdown } from '../lib/sanitize';
 import { IconFire, IconIdea, IconSkills } from './icons';
 import AizcRail from './AizcRail';
-import MaterialsPanel from './MaterialsPanel';
 
 interface BreakdownPageProps {
   persona: string;
@@ -127,8 +126,6 @@ export default function BreakdownPage({ persona }: BreakdownPageProps) {
           )}
         </div>
       </div>
-
-      <MaterialsPanel />
 
       {toast && <div className="toast ok"><span className="toast-icon">✓</span>{toast}</div>}
     </div>
