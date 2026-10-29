@@ -2,8 +2,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   createSchedule, executeSkill, runAgent, streamChat,
   fetchAccounts, publishNow, publishStatus, submitPublishSms, fetchOutputs, mediaUrl,
+  qualityCheck, retroRecord, retroSnapshot, fetchRetroRecords,
 } from '../lib/api';
-import type { AccountItem, OutputFile } from '../lib/api';
+import type { AccountItem, OutputFile, QualityCheckResult, RetroRecord } from '../lib/api';
 import { loadPublishDraft, savePublishDraft } from '../lib/store';
 import { renderMarkdown } from '../lib/sanitize';
 import { IconPublish, IconCopy, IconCheck, IconCalendar, IconSkills, IconEdit, IconStop, IconTrash } from './icons';
@@ -54,6 +55,15 @@ export default function PublishPage({ persona }: PublishPageProps) {
   const [adapting, setAdapting] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState('');
+  // 稿件体检（确定性 4 项：句长/泛化开头/口头禅/来源重复）
+  const [qc, setQc] = useState<QualityCheckResult | null>(null);
+  const [qcBusy, setQcBusy] = useState(false);
+  // T+N 对照复盘
+  const [retroRecords, setRetroRecords] = useState<RetroRecord[]>([]);
+  const [retroLevel, setRetroLevel] = useState('B');
+  const [retroNote, setRetroNote] = useState('');
+  const [retroDays, setRetroDays] = useState(7);
+  const [retroActual, setRetroActual] = useState({ reads: 0, likes: 0, comments: 0, shares: 0 });
   const adaptCtl = useRef<AbortController | null>(null);
   // 异步发布轮询的 interval 集合：离开页面统一清掉，否则最长还会继续转 15 分钟
   const pollTimers = useRef<Set<ReturnType<typeof setInterval>>>(new Set());
@@ -111,6 +121,42 @@ export default function PublishPage({ persona }: PublishPageProps) {
   const showToast = (m: string) => { setToast(m); setTimeout(() => setToast(''), 2800); };
   const effective = (k: string) => overrides[k] ?? body;
   const empty = !title.trim() && !body.trim();
+
+  // 稿件体检 + T+N 复盘（2026-10-29 追加）
+  useEffect(() => {
+    fetchRetroRecords().then((d) => setRetroRecords(d.records || [])).catch(() => { /* 忽略 */ });
+  }, []);
+
+  const checkQuality = async () => {
+    if (!body.trim()) { showToast('请先填写正文再体检'); return; }
+    setQcBusy(true); setQc(null);
+    try {
+      setQc(await qualityCheck(body, ''));
+    } catch (e) {
+      setQc({ ok: false, checks: [], verdict: e instanceof Error ? e.message : '体检失败' });
+    } finally { setQcBusy(false); }
+  };
+
+  const reloadRetro = () => {
+    fetchRetroRecords().then((d) => setRetroRecords(d.records || [])).catch(() => { /* 忽略 */ });
+  };
+
+  const saveRetroRecord = async () => {
+    if (!title.trim()) { showToast('请先填写标题'); return; }
+    try {
+      await retroRecord(title.trim(), platforms[0] || '公众号', { level: retroLevel, reads: 0, note: retroNote });
+      showToast('已登记发布前判断');
+      reloadRetro();
+    } catch (e) { showToast(e instanceof Error ? e.message : '登记失败'); }
+  };
+
+  const saveRetroSnapshot = async (rec: RetroRecord) => {
+    try {
+      const r = await retroSnapshot(rec.title, rec.platform, retroDays, retroActual);
+      showToast(r.verdict.text);
+      reloadRetro();
+    } catch (e) { showToast(e instanceof Error ? e.message : '录入失败'); }
+  };
   const isVideoPath = (p: string) => /\.(mp4|mov|flv|mkv|avi|webm|m4v|wmv|ts|mpe?g)$/i.test(p);
   const toggleMedia = (path: string) =>
     setSelectedMedia((prev) => {
@@ -379,6 +425,10 @@ export default function PublishPage({ persona }: PublishPageProps) {
           <button className="btn btn-sm" disabled={empty || checking || adapting} onClick={check}>
             <IconCheck size={14} /> {checking ? '预检中…' : '发布前预检'}
           </button>
+          <button className="btn btn-sm" disabled={!body.trim() || qcBusy} onClick={checkQuality}
+            title="确定性 4 项检查：句长/泛化开头/口头禅/来源重复，免费不调模型">
+            <IconCheck size={14} /> {qcBusy ? '体检中…' : '稿件体检'}
+          </button>
           <button className="btn btn-sm" disabled={empty} onClick={() => addToCalendar(platforms[0] || 'xiaohongshu')}>
             <IconCalendar size={14} /> 存草稿并排期
           </button>
@@ -400,6 +450,83 @@ export default function PublishPage({ persona }: PublishPageProps) {
             <div className="skill-body-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(checkResult) }} />
           </div>
         )}
+        {qc && (
+          <div className="panel" style={{ marginTop: 10 }}>
+            <div className="panel-title"><IconCheck size={14} /> 稿件体检</div>
+            <div style={{ fontSize: 12.5, marginTop: 6, display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <div style={{ fontWeight: 600, color: qc.ok ? '#059669' : '#ef4444' }}>
+                {qc.ok ? '✅ 通过，可直接发布' : `⚠️ ${qc.verdict}`}
+              </div>
+              {(qc.checks || []).map((c) => (
+                <div key={c.key} style={{ display: 'flex', gap: 6, opacity: c.status === 'ok' ? 0.65 : 1 }}>
+                  <span>{c.status === 'ok' ? '✓' : c.status === 'danger' ? '✗' : '⚠'}</span>
+                  <span>{c.label}：{c.value}</span>
+                  {c.samples && c.samples.length > 0 && (
+                    <span style={{ opacity: 0.7 }}>（{c.samples.join('、')}）</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* T+N 对照复盘：发布前判断 → T+N 实际 → 对照结论 */}
+        <div className="panel" style={{ marginTop: 10 }}>
+          <div className="panel-title"><IconCalendar size={14} /> T+N 对照复盘</div>
+          <div style={{ fontSize: 12, marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ opacity: 0.8 }}>预期档位</span>
+              {['S', 'A', 'B', 'C'].map((lv) => (
+                <button key={lv} className={`btn ${retroLevel === lv ? 'btn-primary' : 'btn-ghost'}`}
+                  style={{ padding: '1px 10px', fontSize: 12 }} onClick={() => setRetroLevel(lv)}>{lv}</button>
+              ))}
+              <input className="field" style={{ padding: '2px 8px', fontSize: 12, flex: 1, minWidth: 120 }}
+                placeholder="预期依据（可选）" value={retroNote}
+                onChange={(e) => setRetroNote(e.target.value)} />
+              <button className="btn btn-sm" disabled={!title.trim()} onClick={saveRetroRecord}
+                title="发布前登记判断；T+N 后录入实际数据看对照结论">
+                <IconCheck size={13} /> 登记判断
+              </button>
+            </div>
+            {retroRecords.length === 0 && (
+              <div style={{ opacity: 0.6 }}>暂无记录。发布前先「登记判断」，T+N 后录入实际数据生成对照结论。</div>
+            )}
+            {retroRecords.map((rec) => (
+              <div key={rec.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 600 }}>{rec.title}</span>
+                  <span className="pv-badge">预期 {rec.prediction.level}</span>
+                  {rec.prediction.note && <span style={{ opacity: 0.6, fontSize: 11 }}>{rec.prediction.note}</span>}
+                  {rec.verdict && (
+                    <span style={{ fontWeight: 600, color: rec.verdict.status === '超预期' ? '#059669' : rec.verdict.status === '命中' ? '#3b82f6' : '#ef4444' }}>
+                      {rec.verdict.status}
+                    </span>
+                  )}
+                </div>
+                {rec.snapshots.length > 0 && (
+                  <div style={{ fontSize: 11.5, opacity: 0.8 }}>
+                    {rec.snapshots.map((s, i) => `T+${s.days}: 阅读${s.actual.reads} 赞${s.actual.likes} 评${s.actual.comments} 转${s.actual.shares}`).join(' ｜ ')}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span>T+</span>
+                  <input type="number" className="field" style={{ width: 56, padding: '1px 6px', fontSize: 12 }}
+                    value={retroDays} min={1} onChange={(e) => setRetroDays(Number(e.target.value) || 7)} />
+                  <span>天</span>
+                  <input type="number" className="field" style={{ width: 84, padding: '1px 6px', fontSize: 12 }} placeholder="阅读"
+                    value={retroActual.reads || ''} onChange={(e) => setRetroActual((v) => ({ ...v, reads: Number(e.target.value) || 0 }))} />
+                  <input type="number" className="field" style={{ width: 60, padding: '1px 6px', fontSize: 12 }} placeholder="赞"
+                    value={retroActual.likes || ''} onChange={(e) => setRetroActual((v) => ({ ...v, likes: Number(e.target.value) || 0 }))} />
+                  <input type="number" className="field" style={{ width: 60, padding: '1px 6px', fontSize: 12 }} placeholder="评"
+                    value={retroActual.comments || ''} onChange={(e) => setRetroActual((v) => ({ ...v, comments: Number(e.target.value) || 0 }))} />
+                  <input type="number" className="field" style={{ width: 84, padding: '1px 6px', fontSize: 12 }} placeholder="转+在看"
+                    value={retroActual.shares || ''} onChange={(e) => setRetroActual((v) => ({ ...v, shares: Number(e.target.value) || 0 }))} />
+                  <button className="btn btn-ghost" style={{ padding: '1px 10px', fontSize: 12 }}
+                    onClick={() => saveRetroSnapshot(rec)}>录入 T+N</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       <div className="publish-previews">

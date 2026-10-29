@@ -12,6 +12,7 @@ import CalendarPage from './components/CalendarPage';
 import IdeasPage from './components/IdeasPage';
 import PublishPage from './components/PublishingPage';
 import BreakdownPage from './components/BreakdownPage';
+import BenchmarkPage from './components/BenchmarkPage';
 import SubNav from './components/SubNav';
 import OnboardingWizard from './components/OnboardingWizard';
 import SettingsPanel from './components/SettingsPanel';
@@ -760,6 +761,8 @@ export default function App() {
         return <PublishPage persona={selectedPersona} />;
       case 'breakdown':
         return <BreakdownPage persona={selectedPersona} />;
+      case 'benchmark':
+        return <BenchmarkPage />;
       case 'skills':
         return <SkillPage persona={selectedPersona} />;
       case 'outputs':
@@ -817,7 +820,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <main className="main-content">
-        {(['trends', 'ideas', 'calendar', 'publish', 'breakdown'] as Page[]).includes(currentPage) && (
+        {(['trends', 'ideas', 'calendar', 'publish', 'breakdown', 'benchmark'] as Page[]).includes(currentPage) && (
           <SubNav current={currentPage} onNavigate={setCurrentPage} />
         )}
         <div className="page-host">

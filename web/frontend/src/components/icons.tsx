@@ -196,3 +196,11 @@ export const IconPublish = ({ size, className, strokeWidth }: P) => (
     <path d="m3 11 18-5v12L3 14v-3z" /><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6" />
   </svg>
 );
+export const IconRadar = ({ size, className, strokeWidth }: P) => (
+  <svg {...svg(size, strokeWidth)} className={className}>
+    <path d="M19.07 4.93A10 10 0 0 0 6.99 3.34" /><path d="M4 6h.01" />
+    <path d="M2.29 9.62a10 10 0 1 0 19.02-1.27" /><path d="M16.24 7.76a6 6 0 1 0-8.49 8.49" />
+    <path d="M12 18h.01" /><path d="M17.99 11.66a6 6 0 0 1-2.22 3.53" />
+    <circle cx="12" cy="12" r="2" /><path d="m13.41 10.59 5.66-5.66" />
+  </svg>
+);

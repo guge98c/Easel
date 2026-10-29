@@ -1011,3 +1011,97 @@ export function triggerAizcAuto(): Promise<{ ok: boolean; message: string }> {
 export function fetchAizcAutoStatus(): Promise<AizcAutoStatus> {
   return request('/api/aizc/auto/status');
 }
+
+// ── 2026-10-29 追加：A/B/C 挂载 + 稿件体检 + 对标监控 + T+N 复盘 ──
+
+// ① 避坑红线（C级避坑清单） + 腰部留存（A/B级留存）
+export interface PitfallResponse { found: boolean; text: string; items: string[]; }
+export function fetchAizcPitfall(): Promise<PitfallResponse> {
+  return request('/api/aizc/pitfall');
+}
+
+export interface RetentionItem {
+  公众号: string; 作者: string; 时间: string; 标题: string;
+  阅读数: string; 在看数: string; 点赞数: string; 转发数: string;
+  评论数: string; 收藏数: string;
+}
+export function fetchAizcRetention(): Promise<{ a: RetentionItem[]; b: RetentionItem[] }> {
+  return request('/api/aizc/retention');
+}
+
+// ② 稿件体检（确定性 4 项：句长/泛化开头/口头禅/来源连续重复）
+export interface QualityCheck {
+  key: string; label: string; status: 'ok' | 'warn' | 'danger'; value: string; samples?: string[];
+}
+export interface QualityCheckResult { ok: boolean; checks: QualityCheck[]; verdict: string; chars?: number; short?: boolean; }
+export function qualityCheck(text: string, source = ''): Promise<QualityCheckResult> {
+  return request('/api/quality/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, source }),
+  });
+}
+
+// ③ 对标监控（存量版）
+export interface BenchmarkAccount {
+  id: string; name: string; platform: string; url: string;
+  median_score: number; avg_score: number; threshold: number | null;
+  hot_count: number; works_count: number; max_score: number;
+}
+export interface BenchmarkAnalysis {
+  metrics: { works_analyzed: number; hot_ratio: number; median_score: number; avg_score: number;
+             max_score: number; top_titles: string[]; avg_likes: number; collect_rate: number };
+  reading: { positioning: string; content_formula: string; strengths: string[];
+             weaknesses: string[]; learn_from: string[]; avoid: string[] };
+  engine: string; cached?: boolean;
+}
+export interface BenchmarkWork { id: string; title: string; url: string; plays: number; likes: number;
+  comments: number; collects: number; shares: number; published_at: string; score: number; }
+export interface BenchmarkSignal { id: string; level: string; title: string; detail: string; created_at: string; }
+export interface BenchmarkAccountDetail extends BenchmarkAccount {
+  works: BenchmarkWork[]; analysis: BenchmarkAnalysis | null; signals: BenchmarkSignal[];
+}
+export function importBenchmark(): Promise<{ ok: boolean; imported_accounts: number; imported_works: number; skipped: number; total_rows: number }> {
+  return request('/api/benchmark/import', { method: 'POST' });
+}
+export function fetchBenchmarkAccounts(): Promise<{ accounts: BenchmarkAccount[] }> {
+  return request('/api/benchmark/accounts');
+}
+export function fetchBenchmarkAccount(id: string): Promise<BenchmarkAccountDetail> {
+  return request(`/api/benchmark/accounts/${encodeURIComponent(id)}`);
+}
+export function analyzeBenchmarkAccount(id: string, force = false): Promise<BenchmarkAnalysis & { cached: boolean }> {
+  return request(`/api/benchmark/accounts/${encodeURIComponent(id)}/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force }),
+  });
+}
+
+// ④ T+N 对照复盘
+export interface RetroRecord {
+  id: string; title: string; platform: string;
+  prediction: { level: string; reads: number; note: string };
+  snapshots: { days: number; actual: { reads: number; likes: number; comments: number; shares: number };
+               at: string }[];
+  verdict?: { status: string; text: string };
+  created_at: string;
+}
+export function retroRecord(title: string, platform: string, prediction: { level: string; reads: number; note: string }): Promise<{ ok: boolean; count: number }> {
+  return request('/api/retro/record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, platform, prediction }),
+  });
+}
+export function retroSnapshot(title: string, platform: string, days: number,
+  actual: { reads: number; likes: number; comments: number; shares: number }): Promise<{ ok: boolean; verdict: { status: string; text: string } }> {
+  return request('/api/retro/snapshot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, platform, days, actual }),
+  });
+}
+export function fetchRetroRecords(): Promise<{ records: RetroRecord[] }> {
+  return request('/api/retro/records');
+}

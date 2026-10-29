@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { fetchAizcPick, fetchAizcAutoStatus, triggerAizcAuto, type AizcPickItem, type AizcAutoStatus } from '../lib/api';
+import { fetchAizcPick, fetchAizcAutoStatus, triggerAizcAuto, fetchAizcPitfall, fetchAizcRetention,
+  type AizcPickItem, type AizcAutoStatus, type PitfallResponse, type RetentionItem } from '../lib/api';
 import { IconFire } from './icons';
 
 interface AizcRailProps {
@@ -27,6 +28,11 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<StatusFilter>('待拆');
   const [q, setQ] = useState('');
+  // 避坑红线（C级）+ 腰部留存（A/B级）—— 2026-10-29 追加
+  const [pitfall, setPitfall] = useState<PitfallResponse | null>(null);
+  const [retention, setRetention] = useState<{ a: RetentionItem[]; b: RetentionItem[] } | null>(null);
+  const [showPitfall, setShowPitfall] = useState(false);
+  const [showRetention, setShowRetention] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -40,6 +46,8 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
     } finally {
       setLoading(false);
     }
+    try { setPitfall(await fetchAizcPitfall()); } catch { /* 忽略 */ }
+    try { setRetention(await fetchAizcRetention()); } catch { /* 忽略 */ }
   };
 
   const loadAuto = async () => {
@@ -146,6 +154,56 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
           </button>
         );
       })}
+      {/* 避坑红线（C级）+ 腰部留存（A/B级）：写作前对照自查 + 已验证腰部池 */}
+      {pitfall && pitfall.found && (
+        <div className="panel" style={{ padding: '8px 10px', fontSize: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+            onClick={() => setShowPitfall((v) => !v)}>
+            <span style={{ fontWeight: 600, color: '#ef4444' }}>⚠ 避坑红线（C级）</span>
+            <span style={{ marginLeft: 'auto', opacity: 0.6 }}>{showPitfall ? '▲' : '▼'}</span>
+          </div>
+          {showPitfall && (
+            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4, opacity: 0.9 }}>
+              {pitfall.items.map((it, i) => (
+                <div key={i} style={{ lineHeight: 1.4 }}>· {it}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {retention && (retention.a.length > 0 || retention.b.length > 0) && (
+        <div className="panel" style={{ padding: '8px 10px', fontSize: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+            onClick={() => setShowRetention((v) => !v)}>
+            <span style={{ fontWeight: 600, color: '#3b82f6' }}>腰部留存（A/B 已发布样本）</span>
+            <span style={{ marginLeft: 'auto', opacity: 0.6 }}>{showRetention ? '▲' : '▼'}</span>
+          </div>
+          {showRetention && (
+            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {retention.a.length > 0 && (
+                <div>
+                  <div style={{ fontWeight: 600, opacity: 0.8 }}>A 级（选题被验证）</div>
+                  {retention.a.slice(0, 6).map((r, i) => (
+                    <div key={i} style={{ lineHeight: 1.4, opacity: 0.9 }}>
+                      · {r.标题}（阅读 {r.阅读数}）
+                    </div>
+                  ))}
+                </div>
+              )}
+              {retention.b.length > 0 && (
+                <div>
+                  <div style={{ fontWeight: 600, opacity: 0.8 }}>B 级（观察池）</div>
+                  {retention.b.slice(0, 6).map((r, i) => (
+                    <div key={i} style={{ lineHeight: 1.4, opacity: 0.9 }}>
+                      · {r.标题}（阅读 {r.阅读数}）
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
