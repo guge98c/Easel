@@ -3,7 +3,7 @@ import {
   importBenchmark, fetchBenchmarkAccounts, fetchBenchmarkAccount, analyzeBenchmarkAccount,
   type BenchmarkAccount, type BenchmarkAccountDetail, type BenchmarkWork,
 } from '../lib/api';
-import { IconRadar, IconRefresh, IconRetry, IconSkills } from './icons';
+import { IconRadar, IconRefresh, IconSkills } from './icons';
 
 /** 对标雷达（存量版）：从 articles_records.csv 导入公众号对标账号 → 规则判定 → 作者分析。 */
 export default function BenchmarkPage() {

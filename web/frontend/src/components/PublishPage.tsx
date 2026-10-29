@@ -504,7 +504,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
                 </div>
                 {rec.snapshots.length > 0 && (
                   <div style={{ fontSize: 11.5, opacity: 0.8 }}>
-                    {rec.snapshots.map((s, i) => `T+${s.days}: 阅读${s.actual.reads} 赞${s.actual.likes} 评${s.actual.comments} 转${s.actual.shares}`).join(' ｜ ')}
+                    {rec.snapshots.map((s) => `T+${s.days}: 阅读${s.actual.reads} 赞${s.actual.likes} 评${s.actual.comments} 转${s.actual.shares}`).join(' ｜ ')}
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
