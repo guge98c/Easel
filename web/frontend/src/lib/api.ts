@@ -1042,42 +1042,6 @@ export function qualityCheck(text: string, source = ''): Promise<QualityCheckRes
   });
 }
 
-// ③ 对标监控（存量版）
-export interface BenchmarkAccount {
-  id: string; name: string; platform: string; url: string;
-  median_score: number; avg_score: number; threshold: number | null;
-  hot_count: number; works_count: number; max_score: number;
-}
-export interface BenchmarkAnalysis {
-  metrics: { works_analyzed: number; hot_ratio: number; median_score: number; avg_score: number;
-             max_score: number; top_titles: string[]; avg_likes: number; collect_rate: number };
-  reading: { positioning: string; content_formula: string; strengths: string[];
-             weaknesses: string[]; learn_from: string[]; avoid: string[] };
-  engine: string; cached?: boolean;
-}
-export interface BenchmarkWork { id: string; title: string; url: string; plays: number; likes: number;
-  comments: number; collects: number; shares: number; published_at: string; score: number; }
-export interface BenchmarkSignal { id: string; level: string; title: string; detail: string; created_at: string; }
-export interface BenchmarkAccountDetail extends BenchmarkAccount {
-  works: BenchmarkWork[]; analysis: BenchmarkAnalysis | null; signals: BenchmarkSignal[];
-}
-export function importBenchmark(): Promise<{ ok: boolean; imported_accounts: number; imported_works: number; skipped: number; total_rows: number }> {
-  return request('/api/benchmark/import', { method: 'POST' });
-}
-export function fetchBenchmarkAccounts(): Promise<{ accounts: BenchmarkAccount[] }> {
-  return request('/api/benchmark/accounts');
-}
-export function fetchBenchmarkAccount(id: string): Promise<BenchmarkAccountDetail> {
-  return request(`/api/benchmark/accounts/${encodeURIComponent(id)}`);
-}
-export function analyzeBenchmarkAccount(id: string, force = false): Promise<BenchmarkAnalysis & { cached: boolean }> {
-  return request(`/api/benchmark/accounts/${encodeURIComponent(id)}/analyze`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force }),
-  });
-}
-
 // ④ T+N 对照复盘
 export interface RetroRecord {
   id: string; title: string; platform: string;
@@ -1104,4 +1068,30 @@ export function retroSnapshot(title: string, platform: string, days: number,
 }
 export function fetchRetroRecords(): Promise<{ records: RetroRecord[] }> {
   return request('/api/retro/records');
+}
+
+// ⑤ 标题库 + 金句/切片库（拆解副产品，自动归档）
+export interface TitleItem {
+  id: string; title: string; formula: string; account: string; reads: string;
+  source: string; created_at: string;
+}
+export interface SnippetItem {
+  id: string; type: string; content: string; account: string;
+  source: string; source_title: string; created_at: string;
+}
+export interface MaterialStats {
+  titles_total: number; snippets_total: number;
+  title_formulas: Record<string, number>; snippet_types: Record<string, number>;
+}
+export function fetchMaterialTitles(q = '', formula = ''): Promise<{ items: TitleItem[]; count: number }> {
+  return request(`/api/materials/titles?q=${encodeURIComponent(q)}&formula=${encodeURIComponent(formula)}`);
+}
+export function fetchMaterialSnippets(q = '', type = ''): Promise<{ items: SnippetItem[]; count: number }> {
+  return request(`/api/materials/snippets?q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}`);
+}
+export function fetchMaterialStats(): Promise<MaterialStats> {
+  return request('/api/materials/stats');
+}
+export function ingestMaterials(): Promise<{ ok: boolean; titles: number; snippets: number; reports: number }> {
+  return request('/api/materials/ingest', { method: 'POST' });
 }

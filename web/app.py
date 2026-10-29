@@ -6030,6 +6030,10 @@ async def _aizc_process_one(item: dict) -> None:
         return
     try:
         path = _aizc_save_report(item, result)
+        try:
+            _materials_ingest_from_report(item, path, result)   # 顺带提炼标题库/切片库
+        except Exception:
+            pass
         ideas = _aizc_extract_ideas(result, item)
         if ideas:
             existing = _read_ideas()
@@ -6128,6 +6132,218 @@ async def api_aizc_auto_status():
         "sleeping": _AIZC_AUTO_TASK is not None and not _AIZC_AUTO_TASK.done(),
     }
 # ── Aizc 爆款库段结束 ──
+
+
+# ══════════════════════════════════════════════════════════════════
+# 新增段 ⑤ 标题库 + 金句/切片库（行业标准素材分层：拆解副产品自动归档）
+# 标题库 outputs/_titles.json：爆款标题 + 公式分类（数字/痛点/悬念/利益/对比/情感/命令/疑问/其他）
+# 切片库 outputs/_snippets.json：钩子 / 结构套路 / 火因 / 可复制模板 / 金句
+# 来源可追溯：每条 source = 拆解报告路径，source_title = 原文标题
+# 触发：拆解完成自动提炼（_aizc_process_one 挂载）+ POST /api/materials/ingest 增量补历史报告
+# ══════════════════════════════════════════════════════════════════
+
+TITLES_FILE = OUTPUTS_DIR / "_titles.json"
+SNIPPETS_FILE = OUTPUTS_DIR / "_snippets.json"
+
+
+def _read_titles() -> list[dict]:
+    try:
+        return json.loads(TITLES_FILE.read_text(encoding="utf-8")) if TITLES_FILE.is_file() else []
+    except Exception:
+        return []
+
+
+def _write_titles(items: list[dict]) -> None:
+    tmp = TITLES_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(TITLES_FILE)
+
+
+def _read_snippets() -> list[dict]:
+    try:
+        return json.loads(SNIPPETS_FILE.read_text(encoding="utf-8")) if SNIPPETS_FILE.is_file() else []
+    except Exception:
+        return []
+
+
+def _write_snippets(items: list[dict]) -> None:
+    tmp = SNIPPETS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(SNIPPETS_FILE)
+
+
+_TITLE_FORMULA_RULES = [
+    ("数字型", lambda t: re.search(r"\d", t) is not None),
+    ("痛点型", lambda t: any(k in t for k in
+        ("为什么", "怎么办", "别再", "千万别", "后悔", "坑", "难", "焦虑", "失败", "裁员", "失业", "痛苦", "中年"))),
+    ("悬念型", lambda t: any(k in t for k in
+        ("揭秘", "真相", "竟然", "没想到", "居然", "秘密", "内幕", "谁也没想到", "直到"))),
+    ("利益型", lambda t: any(k in t for k in
+        ("免费", "必备", "必看", "指南", "秘籍", "全攻略", "收藏", "干货", "清单", "最全", "一文"))),
+    ("对比型", lambda t: any(k in t for k in (" vs ", "对比", "还是", "不如", "取代", "和", "与"))),
+    ("情感型", lambda t: any(k in t for k in
+        ("爱", "恨", "泪", "哭", "心疼", "扎心", "治愈", "崩溃", "心酸", "温暖", "感动"))),
+    ("命令型", lambda t: any(k in t for k in ("请", "记住", "一定要", "务必", "停止", "开始", "抓紧", "趁"))),
+    ("疑问型", lambda t: t.rstrip().endswith(("？", "?", "吗", "呢", "啥", "怎么"))),
+]
+
+
+def _classify_title(title: str) -> str:
+    for name, rule in _TITLE_FORMULA_RULES:
+        if rule(title):
+            return name
+    return "其他"
+
+
+def _strip_md(text: str) -> str:
+    """去掉 markdown 标记，压成单行纯文本。
+    只清行首的标题/引用/列表符号与行内 * ` 强调；保留正文连字符（如 3-4、T+N 不被打断）。"""
+    text = text or ""
+    text = re.sub(r"^[ \t]*#{1,6}[ \t]*", "", text, flags=re.M)   # 行首标题 #
+    text = re.sub(r"^[ \t]*>[ \t]?", "", text, flags=re.M)        # 行首引用 >
+    text = re.sub(r"^[ \t]*[-*+][ \t]+", "", text, flags=re.M)    # 无序列表符号
+    text = text.replace("`", "")                                  # 行内代码
+    text = re.sub(r"\*{1,3}", "", text)                           # 加粗/斜体
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _materials_ingest_from_report(item: dict, report_path: Path, result: str) -> dict:
+    """从一份拆解报告提炼：标题 1 条 + 切片若干（钩子/结构套路/火因/可复制模板 + 最多 2 条金句）。
+    幂等：以 报告路径+标题 / 报告路径+类型 去重。返回新增计数。"""
+    src = str(report_path)
+    src_title = str(item.get("title") or "")
+    account = str(item.get("account") or "")
+    reads = str(item.get("reads") or "")
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    added_t = added_s = 0
+
+    if src_title:
+        titles = _read_titles()
+        if not any(x.get("source") == src and x.get("title") == src_title for x in titles):
+            titles.insert(0, {
+                "id": uuid.uuid4().hex[:12],
+                "title": src_title[:80],
+                "formula": _classify_title(src_title),
+                "account": account, "reads": reads,
+                "source": src, "created_at": now,
+            })
+            _write_titles(titles)
+            added_t = 1
+
+    if not (result and result.strip()):
+        return {"titles": added_t, "snippets": added_s}
+    snippets = _read_snippets()
+    exist = {(x.get("source"), x.get("type")) for x in snippets}
+
+    # 按编号段精确切分：'2. **钩子拆解**：正文' 每段正文截止到下一个行首编号项，
+    # 不再把后文（结构套路/火因/模板/选题清单）一起吞进来。
+    sec_pat = re.compile(
+        r"^[ \t]*\d+[\.、][ \t]*\**\s*(?P<head>[^*：:]+?)\**\s*[：:][ \t]*"
+        r"(?P<body>.*?)(?=^[ \t]*\d+[\.、]|\Z)",
+        re.S | re.M,
+    )
+    sections: dict = {}
+    for m in sec_pat.finditer(result):
+        head = _strip_md(m.group("head")).strip(" 。.，,：:")
+        body = _strip_md(m.group("body"))
+        if head and body:
+            sections.setdefault(head, body)
+
+    # 段标题 → 切片类型；只取本段自己的正文，封顶 240 字
+    for head, typ in (("钩子拆解", "钩子"), ("结构套路", "结构套路"),
+                      ("为什么会火", "火因"), ("可复制模板", "可复制模板")):
+        content = (sections.get(head) or "")[:240]
+        if content and (src, typ) not in exist:
+            snippets.insert(0, {
+                "id": uuid.uuid4().hex[:12], "type": typ, "content": content,
+                "account": account, "source": src, "source_title": src_title[:60],
+                "created_at": now,
+            })
+            exist.add((src, typ))
+            added_s += 1
+
+    # 金句：成对引号内的短句，按内容去重，最多 2 条
+    added_q = 0
+    exist_q = {x.get("content") for x in snippets
+               if x.get("type") == "金句" and x.get("source") == src}
+    for q in re.findall(r"[“\"]([^”\"]{6,50})[”\"]", result):
+        q = q.strip()
+        if q and added_q < 2 and q not in exist_q:
+            snippets.insert(0, {
+                "id": uuid.uuid4().hex[:12], "type": "金句", "content": q,
+                "account": account, "source": src, "source_title": src_title[:60],
+                "created_at": now,
+            })
+            exist_q.add(q)
+            added_q += 1
+            added_s += 1
+    if added_s:
+        _write_snippets(snippets)
+    return {"titles": added_t, "snippets": added_s}
+
+
+@app.get("/api/materials/titles")
+async def api_materials_titles(q: str = "", formula: str = ""):
+    """标题库：可筛选（关键词 / 公式分类）。"""
+    items = _read_titles()
+    if q:
+        items = [x for x in items if q in (x.get("title") or "")]
+    if formula:
+        items = [x for x in items if (x.get("formula") or "") == formula]
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/materials/snippets")
+async def api_materials_snippets(q: str = "", type: str = ""):
+    """切片库：可筛选（关键词 / 类型：钩子/结构套路/火因/可复制模板/金句）。"""
+    items = _read_snippets()
+    if q:
+        items = [x for x in items if q in (x.get("content") or "")]
+    if type:
+        items = [x for x in items if (x.get("type") or "") == type]
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/materials/stats")
+async def api_materials_stats():
+    """素材库统计：标题按公式分类分布 + 切片按类型分布。"""
+    titles, snippets = _read_titles(), _read_snippets()
+    t_dist: dict = {}
+    for x in titles:
+        k = x.get("formula") or "其他"
+        t_dist[k] = t_dist.get(k, 0) + 1
+    s_dist: dict = {}
+    for x in snippets:
+        k = x.get("type") or "其他"
+        s_dist[k] = s_dist.get(k, 0) + 1
+    return {"titles_total": len(titles), "snippets_total": len(snippets),
+            "title_formulas": t_dist, "snippet_types": s_dist}
+
+
+@app.post("/api/materials/ingest")
+async def api_materials_ingest():
+    """扫描 outputs/拆解/ 全部历史报告增量提炼（幂等，可反复跑）。"""
+    total = {"titles": 0, "snippets": 0, "reports": 0}
+    if AIZC_OUT_DIR.is_dir():
+        for md in sorted(AIZC_OUT_DIR.rglob("*.md")):
+            try:
+                txt = md.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            item = {}
+            m = re.search(r"# 拆解报告：(.+)", txt)
+            if m:
+                item["title"] = m.group(1).strip()
+            for key, label in (("account", "账号"), ("reads", "阅读")):
+                m = re.search(rf"{label}[：:]\s*([^\n｜|]+)", txt)
+                if m:
+                    item[key] = m.group(1).strip()
+            body = txt.split("---\n\n## 拆解结果\n\n", 1)[-1] if "---\n\n## 拆解结果\n\n" in txt else txt
+            r = _materials_ingest_from_report(item, md, body)
+            total["titles"] += r["titles"]
+            total["snippets"] += r["snippets"]
+            total["reports"] += 1
+    return {"ok": True, **total}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -6259,272 +6475,6 @@ async def api_quality_check(req: QualityCheckRequest):
     result["chars"] = len(text)
     return result
 
-
-# ══════════════════════════════════════════════════════════════════
-# 新增段 ③ 对标监控（存量版：CSV 导入建档 + 爆款判定 + 作者分析）
-# 数据源：/data/aizc/articles_records.csv（公众号文章采集全量）
-# 判定公式（与见舟 benchmarks.py 一致）：score=赞×1+评×3+藏×4+转×5
-# 爆款阈值 = 中位数×2（中位数为 0 时取均值×1.5）
-# ══════════════════════════════════════════════════════════════════
-
-BENCH_DB = OUTPUTS_DIR / "easel_benchmark.db"
-_bench_db_lock = threading.Lock()
-
-
-def _bench_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(BENCH_DB), timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _bench_init() -> None:
-    with _bench_conn() as db:
-        db.execute("CREATE TABLE IF NOT EXISTS bench_accounts("
-                   "id TEXT PRIMARY KEY, name TEXT, platform TEXT, url TEXT, extra TEXT, created_at TEXT)")
-        db.execute("CREATE TABLE IF NOT EXISTS bench_articles("
-                   "id TEXT PRIMARY KEY, account_id TEXT, title TEXT, url TEXT,"
-                   "plays INTEGER, likes INTEGER, comments INTEGER, collects INTEGER, shares INTEGER,"
-                   "published_at TEXT, body TEXT)")
-        db.execute("CREATE TABLE IF NOT EXISTS bench_analyses("
-                   "id TEXT PRIMARY KEY, account_id TEXT, engine TEXT, checksum TEXT, result_json TEXT, created_at TEXT)")
-        db.execute("CREATE TABLE IF NOT EXISTS bench_signals("
-                   "id TEXT PRIMARY KEY, account_id TEXT, level TEXT, title TEXT, detail TEXT, created_at TEXT)")
-
-
-def _bm_score(w: dict) -> int:
-    return int((w.get("likes") or 0) * 1 + (w.get("comments") or 0) * 3
-               + (w.get("collects") or 0) * 4 + (w.get("shares") or 0) * 5)
-
-
-def _bm_account_stats(account_id: str) -> dict:
-    with _bench_conn() as db:
-        works = [dict(r) for r in db.execute(
-            "SELECT * FROM bench_articles WHERE account_id=?", (account_id,))]
-    for w in works:
-        w["score"] = _bm_score(w)
-    scores = sorted((w["score"] for w in works if w["score"] > 0))
-    n = len(scores)
-    median = (scores[(n - 1) // 2] if n % 2 else (scores[n // 2 - 1] + scores[n // 2]) / 2) if n else 0
-    avg = sum(scores) / n if n else 0
-    th = median * 2 if median > 0 else (avg * 1.5 if avg > 0 else float("inf"))
-    times = sorted((w["published_at"] or "" for w in works if w["published_at"]), reverse=True)
-    return {
-        "median_score": round(median), "avg_score": round(avg), "threshold": round(th) if th != float("inf") else None,
-        "hot_count": sum(1 for w in works if w["score"] > 0 and w["score"] >= th),
-        "works_count": len(works),
-        "max_score": max((w["score"] for w in works), default=0),
-    }
-
-
-def _opencode_json_path() -> Path | None:
-    for p in (Path.home() / ".config/opencode/opencode.json",
-              Path("/home/node/.config/opencode/opencode.json"),
-              PROJECT_ROOT / "home/node/.config/opencode/opencode.json"):
-        try:
-            if p.is_file():
-                return p
-        except OSError:
-            pass
-    return None
-
-
-def _llm_chat(system: str, user: str, timeout: int = 90) -> str:
-    """直连 sen159 provider（配置从 opencode.json 读，不硬编码密钥），OpenAI 兼容 /chat/completions。"""
-    cfg_path = _opencode_json_path()
-    if cfg_path is None:
-        raise RuntimeError("未找到 opencode.json（作者分析需要 sen159 provider 配置）")
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    provider = cfg.get("provider", {}).get("sen159", {})
-    base = (provider.get("options", {}).get("baseURL") or "https://token.sensenova.cn/v1").rstrip("/")
-    key = provider.get("options", {}).get("apiKey") or ""
-    model = cfg.get("model") or "sen159/glm-5.2"
-    if "/" in model and not model.startswith("http"):
-        model = model.split("/", 1)[1]
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "temperature": 0.3,
-    }, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(base + "/chat/completions", data=body, headers={
-        "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode("utf-8"))
-    return ((data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
-
-
-def _bm_extract_json(text: str) -> dict:
-    try:
-        return json.loads(text)
-    except (ValueError, TypeError):
-        m = re.search(r"\{[\s\S]*\}", text or "")
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except ValueError:
-                pass
-    raise RuntimeError("作者分析的模型输出不是合法 JSON，任务失败")
-
-
-def _read_records_csv() -> list[dict]:
-    """读 articles_records.csv（公众号文章全量，utf-8-sig）。"""
-    f = AIZC_DIR / "articles_records.csv"
-    if not f.is_file():
-        return []
-    try:
-        with open(f, encoding="utf-8-sig", newline="") as fh:
-            return [r for r in csv.DictReader(fh) if (r.get("公众号") or "").strip()
-                    and (r.get("标题") or "").strip()]
-    except Exception:
-        return []
-
-
-@app.post("/api/benchmark/import")
-async def api_benchmark_import():
-    """从 articles_records.csv 导入建档：公众号→对标账号，作品六项指标映射入库（幂等去重）。"""
-    _bench_init()
-    rows = _read_records_csv()
-    if not rows:
-        raise HTTPException(404, f"未找到可导入的 articles_records.csv（{AIZC_DIR}）")
-    with _bench_conn() as db:
-        imported_accounts = 0
-        imported_works = 0
-        skipped = 0
-        for r in rows:
-            name = str(r.get("公众号") or "").strip()
-            url = str(r.get("文章长链接") or "").strip()
-            wkey = _wx_link_key(url) or url
-            if not name or not wkey:
-                skipped += 1
-                continue
-            row = db.execute("SELECT id FROM bench_accounts WHERE name=? AND platform='公众号'", (name,)).fetchone()
-            if row:
-                account_id = row["id"]
-            else:
-                account_id = uuid.uuid4().hex[:12]
-                db.execute("INSERT INTO bench_accounts(id,name,platform,url,extra,created_at) VALUES(?,?,?,?,?,?)",
-                           (account_id, name, "公众号", url or "", "", time.strftime("%Y-%m-%d %H:%M:%S")))
-                imported_accounts += 1
-            exists = db.execute("SELECT id FROM bench_articles WHERE id=?", (wkey,)).fetchone()
-            if exists:
-                skipped += 1
-                continue
-            def _num(key: str) -> int:
-                try:
-                    return int(float(str(r.get(key) or "0")))
-                except (TypeError, ValueError):
-                    return 0
-            shares = _num("在看数") + _num("转发数")
-            db.execute(
-                "INSERT INTO bench_articles(id,account_id,title,url,plays,likes,comments,collects,shares,published_at,body)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (wkey, account_id, str(r.get("标题") or "")[:200], url,
-                 _num("阅读数"), _num("点赞数"), _num("评论数"), _num("收藏数"), shares,
-                 str(r.get("时间") or ""), str(r.get("正文") or "")[:4000]))
-            imported_works += 1
-    return {"ok": True, "imported_accounts": imported_accounts,
-            "imported_works": imported_works, "skipped": skipped,
-            "total_rows": len(rows)}
-
-
-@app.get("/api/benchmark/accounts")
-async def api_benchmark_accounts():
-    """对标账号列表：每账号附带规则统计（中位分/均分/爆款数/作品数）。"""
-    _bench_init()
-    with _bench_conn() as db:
-        accounts = [dict(r) for r in db.execute("SELECT * FROM bench_accounts ORDER BY created_at")]
-    for a in accounts:
-        a.update(_bm_account_stats(a["id"]))
-    return {"accounts": accounts}
-
-
-@app.get("/api/benchmark/accounts/{account_id}")
-async def api_benchmark_account_detail(account_id: str):
-    """账号详情：作品（降序分）+ 最新作者分析 + 信号。"""
-    _bench_init()
-    with _bench_conn() as db:
-        account = db.execute("SELECT * FROM bench_accounts WHERE id=?", (account_id,)).fetchone()
-        if account is None:
-            raise HTTPException(404, "对标账号不存在")
-        works = [dict(r) for r in db.execute(
-            "SELECT * FROM bench_articles WHERE account_id=? ORDER BY plays DESC LIMIT 60", (account_id,))]
-        analysis = db.execute(
-            "SELECT * FROM bench_analyses WHERE account_id=? ORDER BY created_at DESC LIMIT 1", (account_id,)).fetchone()
-        signals = [dict(r) for r in db.execute(
-            "SELECT * FROM bench_signals WHERE account_id=? ORDER BY created_at DESC LIMIT 20", (account_id,))]
-    for w in works:
-        w["score"] = _bm_score(w)
-        w.pop("body", None)
-    a = dict(account)
-    a.update(_bm_account_stats(account_id))
-    a["works"] = works
-    a["analysis"] = json.loads(analysis["result_json"]) if analysis else None
-    a["signals"] = signals
-    return a
-
-
-class BenchmarkAnalyzeRequest(BaseModel):
-    force: bool = False
-
-
-@app.post("/api/benchmark/accounts/{account_id}/analyze")
-async def api_benchmark_analyze(account_id: str, req: BenchmarkAnalyzeRequest):
-    """作者分析：规则指标 + LLM 综合解读（定位/内容公式/可学/避免），作品集变化才重算。"""
-    _bench_init()
-    with _bench_conn() as db:
-        account = db.execute("SELECT * FROM bench_accounts WHERE id=?", (account_id,)).fetchone()
-        if account is None:
-            raise HTTPException(404, "对标账号不存在")
-        works = [dict(r) for r in db.execute(
-            "SELECT * FROM bench_articles WHERE account_id=? ORDER BY plays DESC", (account_id,))]
-    if not works:
-        raise HTTPException(409, "该账号暂无作品数据，请先导入")
-    stats = _bm_account_stats(account_id)
-    checksum = hashlib.sha256(json.dumps([
-        {"title": w["title"], "plays": w["plays"], "likes": w["likes"], "comments": w["comments"],
-         "collects": w["collects"], "shares": w["shares"]} for w in works
-    ], ensure_ascii=False).encode("utf-8")).hexdigest()
-    if not req.force:
-        with _bench_conn() as db:
-            cached = db.execute(
-                "SELECT result_json FROM bench_analyses WHERE account_id=? ORDER BY created_at DESC LIMIT 1",
-                (account_id,)).fetchone()
-        if cached:
-            prev = json.loads(cached["result_json"])
-            if prev.get("checksum") == checksum:
-                return {**prev, "cached": True}
-    for w in works:
-        w["score"] = _bm_score(w)
-    top = sorted(works, key=lambda w: w["score"], reverse=True)[:5]
-    hot = [w for w in works if w["score"] > 0 and w["score"] >= (stats["threshold"] or float("inf"))]
-    metrics = {
-        "works_analyzed": len(works),
-        "hot_ratio": round(len(hot) / len(works) * 100, 1) if works else 0,
-        "median_score": stats["median_score"], "avg_score": stats["avg_score"],
-        "max_score": stats["max_score"],
-        "top_titles": [w["title"] for w in top],
-        "avg_likes": round(sum(w["likes"] for w in works) / len(works)) if works else 0,
-        "collect_rate": round(sum(w["collects"] for w in works) / max(sum(w["likes"] for w in works), 1) * 100, 1) if works else 0,
-    }
-    prompt = (
-        "你是内容操盘手。基于以下对标账号数据，输出 JSON："
-        '{"positioning":"","content_formula":"","strengths":[],"weaknesses":[],'
-        '"learn_from":[],"avoid":[]}。只输出 JSON。\n'
-        f"账号：{account['name']}（公众号）\n"
-        f"共 {len(works)} 条作品：中位综合分 {stats['median_score']}，爆款率 {metrics['hot_ratio']}%，"
-        f"高分作品标题：{'、'.join(metrics['top_titles'])}"
-    )
-    try:
-        text = _llm_chat("你是内容操盘手，只输出合法 JSON。", prompt)
-        reading = _bm_extract_json(text)
-    except Exception as e:
-        raise HTTPException(502, f"作者分析失败：{str(e)[:300]}")
-    result = {"metrics": metrics, "reading": reading, "engine": "规则引擎 + sen159 LLM",
-              "checksum": checksum}
-    with _bench_conn() as db:
-        db.execute("INSERT INTO bench_analyses(id,account_id,engine,checksum,result_json,created_at) VALUES(?,?,?,?,?,?)",
-                   (uuid.uuid4().hex[:12], account_id, result["engine"], checksum,
-                    json.dumps(result, ensure_ascii=False), time.strftime("%Y-%m-%d %H:%M:%S")))
-    return {**result, "cached": False}
 
 
 # ══════════════════════════════════════════════════════════════════
