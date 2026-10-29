@@ -6162,8 +6162,16 @@ def _read_aizc_retention() -> dict:
     if _AIZC_RET_CACHE["data"] is not None and _AIZC_RET_CACHE["mtime"] == mtime:
         return _AIZC_RET_CACHE["data"]
     def _fmt(r: dict) -> dict:
-        return {k: str(r.get(k) or "") for k in
-                ("公众号", "作者", "时间", "标题", "阅读数", "在看数", "点赞数", "转发数", "评论数", "收藏数")}
+        def _g(*names: str) -> str:
+            for n in names:
+                if r.get(n):
+                    return str(r[n])
+            return ""
+        return {"公众号": _g("公众号", "账号"), "作者": _g("作者"),
+                "时间": _g("时间", "发布时间"), "标题": _g("标题"),
+                "阅读数": _g("阅读数", "阅读量"), "在看数": _g("在看数", "在看量"),
+                "点赞数": _g("点赞数", "点赞量"), "转发数": _g("转发数", "转发量"),
+                "评论数": _g("评论数", "评论量"), "收藏数": _g("收藏数", "收藏量")}
     data = {
         "a": [_fmt(r) for r in _read_retention_csv(AIZC_RETENTION_A)],
         "b": [_fmt(r) for r in _read_retention_csv(AIZC_RETENTION_B)],
