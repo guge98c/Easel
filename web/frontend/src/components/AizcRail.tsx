@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { fetchAizcPick, fetchAizcAutoStatus, triggerAizcAuto, fetchAizcPitfall, fetchAizcRetention,
-  type AizcPickItem, type AizcAutoStatus, type PitfallResponse, type RetentionItem } from '../lib/api';
+import { fetchAizcPick, fetchAizcAutoStatus, triggerAizcAuto, fetchAizcRetention,
+  type AizcPickItem, type AizcAutoStatus, type RetentionItem } from '../lib/api';
 import { IconFire } from './icons';
 
 interface AizcRailProps {
@@ -28,10 +28,7 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<StatusFilter>('待拆');
   const [q, setQ] = useState('');
-  // 避坑红线（C级）+ 腰部留存（A/B级）—— 2026-10-29 追加
-  const [pitfall, setPitfall] = useState<PitfallResponse | null>(null);
   const [retention, setRetention] = useState<{ a: RetentionItem[]; b: RetentionItem[] } | null>(null);
-  const [showPitfall, setShowPitfall] = useState(false);
   const [showRetention, setShowRetention] = useState(false);
 
   const load = async () => {
@@ -46,7 +43,6 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
     } finally {
       setLoading(false);
     }
-    try { setPitfall(await fetchAizcPitfall()); } catch { /* 忽略 */ }
     try { setRetention(await fetchAizcRetention()); } catch { /* 忽略 */ }
   };
 
@@ -154,23 +150,6 @@ export default function AizcRail({ activeSn, refreshToken, onPick }: AizcRailPro
           </button>
         );
       })}
-      {/* 避坑红线（C级）+ 腰部留存（A/B级）：写作前对照自查 + 已验证腰部池 */}
-      {pitfall && pitfall.found && (
-        <div className="panel" style={{ padding: '8px 10px', fontSize: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
-            onClick={() => setShowPitfall((v) => !v)}>
-            <span style={{ fontWeight: 600, color: '#ef4444' }}>⚠ 避坑红线（C级）</span>
-            <span style={{ marginLeft: 'auto', opacity: 0.6 }}>{showPitfall ? '▲' : '▼'}</span>
-          </div>
-          {showPitfall && (
-            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4, opacity: 0.9 }}>
-              {pitfall.items.map((it, i) => (
-                <div key={i} style={{ lineHeight: 1.4 }}>· {it}</div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
       {retention && (retention.a.length > 0 || retention.b.length > 0) && (
         <div className="panel" style={{ padding: '8px 10px', fontSize: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}

@@ -1074,10 +1074,14 @@ export function fetchRetroRecords(): Promise<{ records: RetroRecord[] }> {
 export interface TitleItem {
   id: string; title: string; formula: string; account: string; reads: string;
   source: string; created_at: string;
+  audience?: string; scene?: string; shell?: string; core?: string;
+  metrics?: string; related_idea?: string; emotion?: string;
 }
 export interface SnippetItem {
   id: string; type: string; content: string; account: string;
   source: string; source_title: string; created_at: string;
+  audience?: string; scene?: string; shell?: string; core?: string;
+  metrics?: string; related_idea?: string; emotion?: string;
 }
 export interface MaterialStats {
   titles_total: number; snippets_total: number;
@@ -1095,3 +1099,50 @@ export function fetchMaterialStats(): Promise<MaterialStats> {
 export function ingestMaterials(): Promise<{ ok: boolean; titles: number; snippets: number; reports: number }> {
   return request('/api/materials/ingest', { method: 'POST' });
 }
+
+// ⑥ Obsidian 素材库桥接（vault 目录：平台/账号/赛道，检索 + 避坑注入；IMA 方案已废弃）
+export interface VaultMaterial {
+  source: string;
+  title: string;
+  text: string;
+  score: number;
+}
+export interface VaultRetrieveResp {
+  platform: string;
+  account: string;
+  track: string | null;
+  query: string;
+  materials: VaultMaterial[];
+  pitfall: string;
+  context: string;
+}
+export function listVaultAccounts(platform: string): Promise<{ platform: string; accounts: string[] }> {
+  return request(`/api/vault/accounts?platform=${encodeURIComponent(platform)}`);
+}
+export function retrieveVault(payload: {
+  platform: string; account: string; query: string; track?: string; top_k?: number;
+}): Promise<VaultRetrieveResp> {
+  return request('/api/vault/retrieve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+// 素材库（Obsidian vault）目录树 + 读文件
+export interface VaultFileNode {
+  name: string; rel: string; kind: 'pitfall' | 'material'; size: number;
+}
+export interface VaultAccountNode {
+  account: string; files: VaultFileNode[];
+}
+export interface VaultPlatformNode {
+  platform: string; folder: string; accounts: VaultAccountNode[];
+}
+export function listVaultTree(): Promise<{ tree: VaultPlatformNode[]; error: string | null }> {
+  return request('/api/vault/tree');
+}
+export function fetchVaultFile(platform: string, account: string, path: string): Promise<{ name: string; content: string }> {
+  return request(`/api/vault/file?platform=${encodeURIComponent(platform)}&account=${encodeURIComponent(account)}&path=${encodeURIComponent(path)}`);
+}
+

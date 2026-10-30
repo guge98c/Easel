@@ -7,7 +7,7 @@ export default function MaterialsPage() {
       <div className="page-head">
         <div>
           <h1 className="page-title"><IconLayers size={21} /> 素材库</h1>
-          <p className="page-subtitle">拆解自动沉淀的标题与金句/切片，按公式与类型归类，可一键复制复用。</p>
+          <p className="page-subtitle">直接展示 Obsidian 素材库（vault）目录：每个账号下的素材与两份硬性避坑红线，写稿时自动带入。</p>
         </div>
       </div>
 

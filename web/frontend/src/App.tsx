@@ -16,10 +16,11 @@ import MaterialsPage from './components/MaterialsPage';
 import SubNav from './components/SubNav';
 import OnboardingWizard from './components/OnboardingWizard';
 import SettingsPanel from './components/SettingsPanel';
+import PlatformPicker, { type VaultSelection } from './components/PlatformPicker';
 import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat } from './lib/api';
 import type { PersonaItem, UploadedFile, ChatQuestion } from './lib/api';
 import { questionStatus } from './lib/api';
-import { deleteSession as deleteRemoteSession } from './lib/api';
+import { deleteSession as deleteRemoteSession, retrieveVault } from './lib/api';
 import {
   loadSessions,
   saveSessions,
@@ -57,6 +58,7 @@ export default function App() {
   const [showRecommend, setShowRecommend] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftTopic, setDraftTopic] = useState<string | null>(null);
   // 装完还没配模型时，首开要把用户直接带到模型设置页（安装脚本不再在终端问 Key）
   const [needModelSetup, setNeedModelSetup] = useState(false);
 
@@ -542,9 +544,23 @@ export default function App() {
     sendUserAndStream(sessionId, displayText, attachments, legacyAgentText, userIndex);
   }, [sendUserAndStream]);
 
-  // 热点「一键做成内容」：新开会话，把选题作为指令发出去，跳到对话页。
+  // 热点「一键做成内容」：先弹平台→账号两级选择器（vault 素材库），确认后再写稿
   const handleUseTopic = useCallback((title: string) => {
-    const prompt = `围绕当前热点「${title}」：先判断它适不适合我的账号赛道；若合适，给 2-3 个差异化的二创角度，并把你最推荐的那条写成可直接发布的文案初稿。`;
+    setDraftTopic(title);
+  }, []);
+
+  // 真实写稿：按所选平台+账号从 Obsidian 素材库(vault)检索，注入写稿指令（命中素材 + 避坑红线）
+  const launchDraft = useCallback(async (title: string, sel: VaultSelection | null) => {
+    let prompt = `围绕当前热点「${title}」：先判断它适不适合我的账号赛道；若合适，给 2-3 个差异化的二创角度，并把你最推荐的那条写成可直接发布的文案初稿。`;
+    if (sel) {
+      try {
+        const res = await retrieveVault({ platform: sel.platform, account: sel.account, query: title });
+        prompt += `\n\n【素材库检索上下文（来自 Obsidian 素材库 ${sel.platform} / ${sel.account}，仅供参考，按需取用）】\n${res.context}`;
+      } catch {
+        /* vault 不可用时退回纯 AI 写稿 */
+        prompt += `\n\n（注：素材库检索暂不可用，已退回纯 AI 写稿）`;
+      }
+    }
     const ns = createSession(selectedPersona || undefined);
     setSessions((prev) => { const u = [ns, ...prev]; saveSessions(u); return u; });
     setActiveSessionId(ns.id);
@@ -761,14 +777,14 @@ export default function App() {
         return <PublishPage persona={selectedPersona} />;
       case 'breakdown':
         return <BreakdownPage persona={selectedPersona} />;
-      case 'materials':
-        return <MaterialsPage />;
       case 'skills':
         return <SkillPage persona={selectedPersona} />;
       case 'outputs':
         return <OutputsPage jumpPath={outputsJump} onJumpHandled={clearOutputsJump} />;
       case 'accounts':
         return <AccountsPage />;
+      case 'materials':
+        return <MaterialsPage />;
       case 'profile':
         return <ProfilePage persona={selectedPersona} onUsePersona={handlePersonaChange} onNewProfile={() => setShowWizard(true)} onDeleted={handleProfileDeleted} />;
       default:
@@ -866,6 +882,15 @@ export default function App() {
               setGatewayStatus(data.gateway ? 'connected' : 'disconnected');
             }).catch(() => setGatewayStatus('disconnected'));
           }}
+        />
+      )}
+
+      {/* 做内容：平台→账号两级选择器（Obsidian 素材库 vault 桥） */}
+      {draftTopic !== null && (
+        <PlatformPicker
+          topic={draftTopic}
+          onCancel={() => setDraftTopic(null)}
+          onConfirm={(sel) => { setDraftTopic(null); void launchDraft(draftTopic, sel); }}
         />
       )}
     </div>

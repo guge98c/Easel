@@ -172,7 +172,10 @@ SKILLS_DIR = PROJECT_ROOT / "skills"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-REACT_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
+# dev 预览隔离：默认仍用 frontend/dist（线上 7860 不受影响）；
+# 起 8888 时通过 EASEL_REACT_DIST 指向独立构建目录，避免覆盖线上 dist。
+_REACT_DIST_OVERRIDE = os.environ.get("EASEL_REACT_DIST")
+REACT_DIR = Path(_REACT_DIST_OVERRIDE).resolve() if _REACT_DIST_OVERRIDE else (Path(__file__).resolve().parent / "frontend" / "dist")
 OPENCLAW_PROFILE = "easel"
 # 对话传输层：http＝直连常驻 gateway 的 OpenAI 兼容端点，agent 在 gateway 进程里直接跑，
 # 省掉每轮 spawn `openclaw agent` 瘦客户端的冷启动（本机实测同一句话：CLI 7.1-7.6s/轮，
@@ -1300,6 +1303,61 @@ async def api_status():
     return {"gateway": ready, "transport": "api" if direct else (
                 CHAT_TRANSPORT if runtime == "openclaw" else runtime), "runtime": runtime,
             "skills": get_skills(), "personas": list_personas()}
+
+
+# ===== Obsidian 素材库（vault）检索 API =====
+# 目录结构： <VAULT_ROOT>/<平台文件夹(公众号→Gzh)>/<账号>/<赛道(可选)>/*.md
+# 检索模块 vault_retriever 依赖 lancedb/fastembed/jieba（已写进 requirements.txt 走 CI 持久化）。
+# 此处惰性导入，缺依赖时只让这两个接口降级，不影响整个 app 启动。
+VAULT_ROOT = os.environ.get("VAULT_ROOT", "/data/vault")
+
+
+def _load_vault_retriever():
+    """惰性导入检索模块：缺依赖时只让 vault 接口降级，不影响整个 app 启动。"""
+    sys.path.insert(0, os.path.dirname(__file__))
+    import vault_retriever as vr  # noqa: E402
+    return vr
+
+
+@app.get("/api/vault/accounts")
+async def api_vault_accounts(platform: str = "公众号"):
+    """列出某平台下的账号库（做内容第二级选择器数据源）。"""
+    try:
+        vr = _load_vault_retriever()
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=200, content={"platform": platform, "accounts": [],
+                                                      "error": f"检索模块不可用(缺依赖 lancedb/fastembed/jieba): {e}"})
+    try:
+        accounts = vr.list_accounts(platform, VAULT_ROOT)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=200, content={"platform": platform, "accounts": [], "error": str(e)})
+    return {"platform": platform, "accounts": accounts}
+
+
+class VaultRetrieveReq(BaseModel):
+    platform: str = "公众号"
+    account: str
+    query: str
+    track: str = ""
+    top_k: int = 8
+
+
+@app.post("/api/vault/retrieve")
+async def api_vault_retrieve(req: VaultRetrieveReq):
+    """检索某账号素材库 + 避坑红线，返回素材与可直接注入写稿的上下文。"""
+    try:
+        vr = _load_vault_retriever()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"检索模块不可用(缺依赖 lancedb/fastembed/jieba): {e}")
+    track = req.track or None
+    try:
+        bundle = vr.retrieve_bundle(req.platform, req.account, req.query, top_k=req.top_k,
+                                    root=VAULT_ROOT, track=track)
+    except ValueError as e:  # 平台/账号名非法（含路径穿越尝试）
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"platform": req.platform, "account": req.account, "track": track,
+            "query": req.query, "materials": bundle["materials"],
+            "pitfall": bundle["pitfall"], "context": bundle["context"]}
 
 
 @app.get("/api/settings/bootstrap")
@@ -5820,6 +5878,7 @@ def _aizc_item(r: dict, marks: dict) -> dict:
         "articleGrade": str(r.get("文章档位") or "").strip(),
         "accountGrade": str(r.get("账号档位") or "").strip(),
         "subTrack": str(r.get("子赛道") or "").strip(),
+        "platform": str(r.get("平台") or "").strip(),
         # overlay 优先：Easel 侧标记 > CSV 状态（管道维护）
         "status": (ov.get("status") or str(r.get("拆解状态") or "").strip() or "待拆"),
         "hasBody": bool(str(r.get("正文") or "").strip()),
@@ -5911,8 +5970,19 @@ def _aizc_build_prompt(item: dict, body: str) -> str:
              (f"｜收藏率 {item.get('collectRate')}" if item.get("collectRate") else "") +
              (f"｜阅读 {item.get('reads')}" if item.get("reads") else "") +
              (f"｜发布 {item.get('publishTime')}" if item.get("publishTime") else "") + "\n")
+    platform = (item.get("platform") or "").strip()
+    PLATFORM_SPEC = {
+        "公众号": "重点拆解：标题技巧、开头钩子、金句/观点密度、长文结构、引发转发的情绪点。",
+        "知乎": "重点拆解：问题切入角度、专业可信度构建、长回答逻辑骨架、高赞答主话术。",
+        "B站": "重点拆解：视频开头3秒钩子、信息密度节奏、弹幕/评论共鸣点、封面与标题配合。",
+        "小红书": "重点拆解：20字内标题、emoji节奏、封面文案、种草/痛点结构、话题标签、首图钩子。",
+        "抖音": "重点拆解：口播黄金3秒、逐句脚本结构、画面提示、转折设计、引导互动/关注的钩子。",
+        "视频号": "重点拆解：社交转发触发点、熟人关系共鸣、口播节奏、结尾引导分享。",
+        "快手": "重点拆解：老铁信任感构建、真实接地气人设、原生感口播、评论区互动。",
+    }
+    platform_tip = PLATFORM_SPEC.get(platform, "（未标注平台，按通用图文爆款拆解）")
     return (
-        "你是爆款内容拆解专家。拆解下面这条内容，用中文分点输出：\n"
+        f"你是爆款内容拆解专家（目标平台：{platform or '通用'}）。{platform_tip}\n" + "拆解下面这条内容，用中文分点输出：\n" +
         "1. **一句话概括**\n"
         "2. **钩子拆解**：开头为什么抓人\n"
         "3. **结构套路**：分段/节奏/信息编排\n"
@@ -6034,12 +6104,7 @@ async def _aizc_process_one(item: dict) -> None:
             _materials_ingest_from_report(item, path, result)   # 顺带提炼标题库/切片库
         except Exception:
             pass
-        ideas = _aizc_extract_ideas(result, item)
-        if ideas:
-            existing = _read_ideas()
-            existing[0:0] = ideas
-            _write_ideas(existing)
-        _aizc_mark(sn, "已拆", f"报告：{path.name}；提炼选题 {len(ideas)} 条")
+        _aizc_mark(sn, "已拆", f"报告：{path.name}；已存素材库（按平台拆解，不入库选题）")
     except Exception as e:
         _aizc_mark(sn, "拆解失败", f"落库失败：{str(e)[:120]}")
 
@@ -6593,6 +6658,35 @@ async def api_retro_records():
             r["verdict"] = _retro_verdict(r.get("prediction") or {}, snapshots[-1].get("actual") or {})
     return {"records": records}
 
+
+
+@app.get("/api/vault/tree")
+async def api_vault_tree():
+    """素材库目录树（平台->账号->文件），供前端"素材库"页面展示。"""
+    try:
+        vr = _load_vault_retriever()
+        return {"tree": vr.tree(VAULT_ROOT), "error": None}
+    except Exception as e:
+        return {"tree": [], "error": f"检索模块不可用(缺依赖 lancedb/fastembed/jieba): {e}"}
+
+
+@app.get("/api/vault/file")
+async def api_vault_file(platform: str, account: str, path: str):
+    """读取某个素材文件全文（path 为账号目录下的相对路径）。"""
+    try:
+        vr = _load_vault_retriever()
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"检索模块不可用(缺依赖 lancedb/fastembed/jieba): {e}"}, status_code=503)
+    try:
+        base = vr._account_dir(platform, account, VAULT_ROOT).resolve()
+        target = (base / path).resolve()
+        if not str(target).startswith(str(base)):
+            return JSONResponse({"error": "非法路径"}, status_code=400)
+        if not target.is_file():
+            return JSONResponse({"error": "文件不存在"}, status_code=404)
+        return {"name": target.name, "content": target.read_text(encoding="utf-8", errors="ignore")}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 if __name__ == "__main__":
     import uvicorn

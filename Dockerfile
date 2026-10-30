@@ -67,6 +67,20 @@ RUN npm install -g openclaw@2026.10.8 --registry https://registry.npmjs.org --lo
 # 5. OpenCode 执行引擎（锁版本；Web 设置 → 执行引擎 可选 OpenCode，原生认证 opencode auth login）
 RUN npm install -g @opencode/cli@2.2.1 --registry https://registry.npmjs.org --loglevel warn
 
+# 6. Obsidian 素材库检索依赖（2026-10-30 追加）：LanceDB 向量库 + fastembed 中文 embedding + jieba 中文分词
+#    刻意独立成层、且排在依赖层区最后：前面的层（venv 123 包 / playwright / 引擎）全部命中缓存，
+#    只有这一层是新的 → NAS 端 docker pull 仍走增量。（若写进 requirements.txt 会重建 GB 级大层）
+RUN /app/.venv/bin/pip install --no-cache-dir --prefer-binary \
+        lancedb==0.41.0 fastembed==0.9.1 jieba==0.42.1 \
+        -i https://pypi.org/simple
+
+# 7. 预下载中文 embedding 模型（bge-small-zh-v1.5，约 93MB）进镜像
+#    不预热的后果：每次重建容器后第一次「做内容」要现场下载模型，用户会以为卡死。
+#    下载失败不阻断构建（|| true）—— 最多退化成运行时再下一次。
+RUN HF_ENDPOINT=https://hf-mirror.com /app/.venv/bin/python -c \
+      "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-zh-v1.5')" \
+    || echo "（模型预热跳过，运行时按需下载）"
+
 # ===== 源码层区（放最后：以后改业务代码只失效这两层）=====
 # 仓库整体复制（skills/、agents/、scripts/、web/ 全量；覆盖上面的 easel/ 为新代码）
 COPY . .
