@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1340,11 +1341,13 @@ class VaultRetrieveReq(BaseModel):
     query: str
     track: str = ""
     top_k: int = 8
+    include_c_level: bool = False  # 是否额外加载 C级避坑清单（默认不加载，按需传 True）
 
 
 @app.post("/api/vault/retrieve")
 async def api_vault_retrieve(req: VaultRetrieveReq):
-    """检索某账号素材库 + 避坑红线，返回素材与可直接注入写稿的上下文。"""
+    """检索某账号素材库 + 避坑红线，返回素材与可直接注入写稿的上下文。
+    默认只加载 避坑红线.md；include_c_level=True 时额外加载 C级避坑清单.md。"""
     try:
         vr = _load_vault_retriever()
     except Exception as e:  # noqa: BLE001
@@ -1352,7 +1355,8 @@ async def api_vault_retrieve(req: VaultRetrieveReq):
     track = req.track or None
     try:
         bundle = vr.retrieve_bundle(req.platform, req.account, req.query, top_k=req.top_k,
-                                    root=VAULT_ROOT, track=track)
+                                    root=VAULT_ROOT, track=track,
+                                    include_c_level=req.include_c_level)
     except ValueError as e:  # 平台/账号名非法（含路径穿越尝试）
         raise HTTPException(status_code=400, detail=str(e))
     return {"platform": req.platform, "account": req.account, "track": track,
@@ -6079,7 +6083,7 @@ async def _aizc_run_one(prompt: str) -> str:
 
 
 async def _aizc_process_one(item: dict) -> None:
-    """拆解单篇：报告落库 → 提炼选题入 _ideas.json → 标记已拆；失败标记拆解失败待重试。"""
+    """拆解单篇：报告落库 → S/A+存素材库（写稿AI用）→ A/B（3天内）再入选题库（人审核）→ 标记已拆；失败标记拆解失败待重试。"""
     sn = item["sn"]
     _aizc_mark(sn, "拆解中", "自动拆解进行中")
     body = str(item.get("body") or "")
@@ -6101,10 +6105,32 @@ async def _aizc_process_one(item: dict) -> None:
     try:
         path = _aizc_save_report(item, result)
         try:
-            _materials_ingest_from_report(item, path, result)   # 顺带提炼标题库/切片库
+            _materials_ingest_from_report(item, path, result)   # S/A+：提炼标题库/切片库（写稿AI用）
         except Exception:
             pass
-        _aizc_mark(sn, "已拆", f"报告：{path.name}；已存素材库（按平台拆解，不入库选题）")
+        # A/B 档位 + 最近3天：提炼选题入 _ideas.json（人审核，不想要的可手动踢除）
+        grade = (item.get("articleGrade") or "").strip()
+        ideas = []
+        if grade in ("A", "B"):
+            pub_time = str(item.get("publishTime") or "").strip()
+            try:
+                pub_date = datetime.strptime(pub_time[:10], "%Y-%m-%d")
+                if pub_date >= datetime.now() - timedelta(days=3):
+                    ideas = _aizc_extract_ideas(result, item)
+                    if ideas:
+                        existing = _read_ideas()
+                        existing.extend(ideas)
+                        _write_ideas(existing)
+            except Exception:
+                pass  # 日期解析失败不影响主流程
+        parts = [f"报告：{path.name}"]
+        if grade in ("S", "A+"):
+            parts.append("已存素材库（S/A+框架/金句，写稿AI用）")
+        elif grade in ("A", "B") and ideas:
+            parts.append(f"已入选题库（{len(ideas)}条，人审核）")
+        elif grade in ("A", "B"):
+            parts.append("已存素材库（A/B框架）")
+        _aizc_mark(sn, "已拆", "；".join(parts))
     except Exception as e:
         _aizc_mark(sn, "拆解失败", f"落库失败：{str(e)[:120]}")
 
