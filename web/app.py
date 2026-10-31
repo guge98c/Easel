@@ -5801,14 +5801,14 @@ async def api_ideas_delete(iid: str):
 
 
 # ════════════ Aizc 爆款库（纯追加段，2026-10-28）════════════
-# 只读消费 Aizc_pick.csv（自包含：情报+拆解状态+正文，由 Windows 侧 grade-viral.py 生成，
+# 只读消费 Aizc.csv（自包含：情报+拆解状态+正文，由 Windows 侧 grade-viral.py 生成，
 # 经 Windows↔NAS 目录同步到达 AIZC_PICK_DIR 挂载路径）。Easel 对 CSV 永远只读；
 # 拆解进度记在 outputs/_aizc_status.json（本机 overlay），不回写 CSV——
-# 管道每轮全量覆盖 Aizc_pick.csv 且自带状态继承，容器回写必然与覆盖/同步互相冲账。
+# 管道每轮全量覆盖 Aizc.csv 且自带状态继承，容器回写必然与覆盖/同步互相冲账。
 import csv  # noqa: E402  纯追加段自带依赖，避免改头部导入区
 
 AIZC_DIR = Path(os.environ.get("AIZC_PICK_DIR") or (OUTPUTS_DIR / "aizc"))
-AIZC_PICK_FILE = AIZC_DIR / "Aizc_pick.csv"
+AIZC_PICK_FILE = AIZC_DIR / "Aizc.csv"
 AIZC_STATUS_FILE = OUTPUTS_DIR / "_aizc_status.json"
 AIZC_STATUSES = {"待拆", "拆解中", "已拆", "不拆", "拆解失败"}
 _AIZC_CACHE: dict = {"mtime": None, "rows": None, "error": ""}
@@ -5842,10 +5842,10 @@ def _write_aizc_marks(marks: dict) -> None:
 
 
 def _read_aizc_rows() -> tuple:
-    """读 Aizc_pick.csv（utf-8-sig，按 mtime 缓存）。解析失败沿用上一份好数据
+    """读 Aizc.csv（utf-8-sig，按 mtime 缓存）。解析失败沿用上一份好数据
     （目录同步可能写到一半，宁可给旧数据也不白屏）。返回 (rows|None, error)。"""
     if not AIZC_PICK_FILE.is_file():
-        return None, f"未找到 Aizc_pick.csv（AIZC_PICK_DIR={AIZC_DIR}）"
+        return None, f"未找到 Aizc.csv（AIZC_PICK_DIR={AIZC_DIR}）"
     try:
         mtime = AIZC_PICK_FILE.stat().st_mtime
     except OSError as e:
@@ -5905,7 +5905,7 @@ async def api_aizc_article(sn: str):
     """单篇详情：正文+情报。拆解时按需取，保证拿到的是同步过来的最新正文。"""
     rows, err = _read_aizc_rows()
     if rows is None:
-        raise HTTPException(404, err or "Aizc_pick.csv 不可读")
+        raise HTTPException(404, err or "Aizc.csv 不可读")
     want = (sn or "").strip()
     for r in rows:
         if _wx_link_key(str(r.get("文章链接") or "")) == want:
@@ -5936,7 +5936,7 @@ async def api_aizc_mark(req: AizcMarkItem):
 
 
 # ── 自动拆解（2026-10-28 追加）──────────────────────────────
-# 后台轮询 Aizc_pick.csv：发现「待拆」→ 串行拆解 → ①报告落 outputs/拆解/{日期}/{标题}.md
+# 后台轮询 Aizc.csv：发现「待拆」→ 串行拆解 → ①报告落 outputs/拆解/{日期}/{标题}.md
 # （agent 工作区内，对话时 AI 可读）②提炼 3 个选题入 _ideas.json 选题库 ③自动标记已拆。
 # 失败自动标记「拆解失败」并按 _AIZC_RETRY_GAP 退避重试（限流/超时同路径）。
 AIZC_OUT_DIR = OUTPUTS_DIR / "拆解"
