@@ -1134,15 +1134,6 @@ export function retrieveVault(payload: {
 export function checkWritingGate(sessionId: string): Promise<{ ok: boolean; retrieve_count: number }> {
   return request(`/api/writing/gate?session_id=${encodeURIComponent(sessionId)}`);
 }
-export function notifyWritingGate(payload: {
-  title: string; account: string; session_id: string; dry_run?: boolean;
-}): Promise<{ sent: boolean; would_send?: string; error?: string }> {
-  return request('/api/writing/gate/notify', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-}
 
 // 素材库（Obsidian vault）目录树 + 读文件
 export interface VaultFileNode {

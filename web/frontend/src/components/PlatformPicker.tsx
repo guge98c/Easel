@@ -11,7 +11,7 @@ const PLATFORMS: { key: string; label: string }[] = [
   { key: 'B站', label: '🟡 B站' },
 ];
 
-export interface VaultSelection { platform: string; account: string; includeCLevel: boolean; }
+export interface VaultSelection { platform: string; account: string; }
 
 export default function PlatformPicker({
   topic, onCancel, onConfirm,
@@ -27,9 +27,8 @@ export default function PlatformPicker({
   const [preview, setPreview] = useState<{ count: number; pitfall: string; items: VaultMaterial[] } | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>('');
-  const [includeCLevel, setIncludeCLevel] = useState<boolean>(false);
 
-  useEffect(() => { setStep('platform'); setPlatform(''); setAccounts([]); setAccount(''); setPreview(null); setErr(''); setIncludeCLevel(false); }, [topic]);
+  useEffect(() => { setStep('platform'); setPlatform(''); setAccounts([]); setAccount(''); setPreview(null); setErr(''); }, [topic]);
 
   const pickPlatform = async (p: string) => {
     setPlatform(p); setLoading(true); setErr(''); setAccounts([]); setPreview(null);
@@ -47,11 +46,10 @@ export default function PlatformPicker({
     }
   };
 
-  const pickAccount = async (a: string, flag?: boolean) => {
-    const withCLevel = flag ?? includeCLevel;
+  const pickAccount = async (a: string) => {
     setAccount(a); setLoading(true); setErr(''); setPreview(null);
     try {
-      const r = await retrieveVault({ platform, account: a, query: topic, include_c_level: withCLevel });
+      const r = await retrieveVault({ platform, account: a, query: topic });
       setPreview({ count: (r.materials || []).length, pitfall: r.pitfall || '', items: r.materials || [] });
     } catch (e) {
       setPreview({ count: 0, pitfall: '', items: [] });
@@ -130,13 +128,6 @@ export default function PlatformPicker({
               </div>
             )}
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, fontSize: 13, color: 'var(--text-secondary, #555)', cursor: 'pointer' }}>
-              <input type="checkbox" checked={includeCLevel}
-                onChange={(e) => { setIncludeCLevel(e.target.checked); if (account) pickAccount(account, e.target.checked); }}
-                style={{ width: 15, height: 15, accentColor: 'var(--accent-end, #4338ca)' }} />
-              ⚠️ 同时带上 C 级避坑清单（默认只带避坑红线，勾上额外加载该账号的 C 级清单）
-            </label>
-
             {preview && !loading && (
               <div style={{
                 marginTop: 14, fontSize: 12.5, color: 'var(--text-secondary, #444)',
@@ -144,8 +135,8 @@ export default function PlatformPicker({
                 borderRadius: 8, padding: '8px 10px',
               }}>
                 预览检索「{platform} / {account}」：命中 <b>{preview.count}</b> 条素材。
-                正式写稿时 AI 将按检索指引自行检索：避坑红线 {preview.pitfall.length} 字
-                {includeCLevel ? '（另含 C 级避坑清单）' : ''}会由 AI 读取对照，素材全文按需取用：
+                正式写稿时 AI 将按检索指引自行检索：避坑红线 {preview.pitfall.length} 字必读对照，
+                C 级避坑清单由 AI 按需加载，素材全文按需取用：
                 <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
                   {preview.items.slice(0, 3).map((m, i) => (
                     <li key={i}>{m.title.slice(0, 40)}{m.title.length > 40 ? '…' : ''}</li>
@@ -165,7 +156,7 @@ export default function PlatformPicker({
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
           <button onClick={onCancel} style={btnGhost}>取消</button>
           {step === 'account' && (
-            <button onClick={() => onConfirm({ platform, account, includeCLevel })} disabled={!account}
+            <button onClick={() => onConfirm({ platform, account })} disabled={!account}
               style={{ ...btnPrimary, opacity: account ? 1 : 0.5 }}>确认并开始写稿</button>
           )}
         </div>

@@ -20,7 +20,7 @@ import PlatformPicker, { type VaultSelection } from './components/PlatformPicker
 import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat } from './lib/api';
 import type { PersonaItem, UploadedFile, ChatQuestion } from './lib/api';
 import { questionStatus } from './lib/api';
-import { deleteSession as deleteRemoteSession, checkWritingGate, notifyWritingGate } from './lib/api';
+import { deleteSession as deleteRemoteSession, checkWritingGate } from './lib/api';
 import {
   loadSessions,
   saveSessions,
@@ -537,7 +537,7 @@ export default function App() {
     sendUserAndStream(sessionId, displayText, attachments);
   }, [sendUserAndStream]);
 
-  // 写稿门禁：写稿会话流结束后核查检索台账——不达标自动打回重试一次，仍不达标飞书通知
+  // 写稿门禁：交稿前核查检索台账——没检索自动打回重写一次，重写后直接放行
   const runWritingGate = useCallback(async (sessionId: string) => {
     const st = writingGateRef.current[sessionId];
     if (!st) return;
@@ -553,11 +553,6 @@ export default function App() {
         sendUserAndStream(sessionId, '门禁打回：刚才的稿件没有检索素材库与避坑红线。请现在按【素材库检索指引】完成检索（curl 调接口，读取返回的避坑红线并对照），检索完成后再重新给出可直接发布的文案初稿。');
       } else {
         delete writingGateRef.current[sessionId];
-        appendAssistant(sessionId, {
-          role: 'assistant',
-          content: '⛔ 写稿门禁：自动重试后仍未检测到检索记录，本稿件判不通过，已通知飞书群人工处理。',
-        });
-        await notifyWritingGate({ title: st.title, account: st.account, session_id: sessionId });
       }
     } catch { /* 门禁服务不可用时不阻塞会话 */ }
   }, [appendAssistant, sendUserAndStream]);
@@ -595,8 +590,8 @@ export default function App() {
 
 【素材库检索指引（必须遵守：交稿前未完成检索，稿件直接判不过关并打回）】
 1. 先按你定好的角度确定检索关键词（可 1-3 个、可多轮），在本机执行：
-   curl -s -X POST http://localhost:7860/api/vault/retrieve -H 'Content-Type: application/json' -d '{"platform":"${sel.platform}","account":"${sel.account}","query":"<关键词>","include_c_level":${sel.includeCLevel},"session_id":"${ns.id}"}'
-   接口一次返回：命中素材（含相关度）+ 该账号避坑红线${sel.includeCLevel ? ' + C级避坑清单' : ''}。
+   curl -s -X POST http://localhost:7860/api/vault/retrieve -H 'Content-Type: application/json' -d '{"platform":"${sel.platform}","account":"${sel.account}","query":"<关键词>","session_id":"${ns.id}"}'
+   接口一次返回：命中素材（含相关度）+ 该账号避坑红线。题材涉及合规敏感或拿不准时，body 可加 "include_c_level":true 额外加载 C 级避坑清单。
 2. 逐条读返回的避坑红线并对照自查；命中素材按需读全文（素材库根目录 /data/vault/ 下 平台/账号/素材.md，可直接浏览）。
 3. 严禁照抄原文连续 16 字。
 本会话交稿时后端会按 session_id=${ns.id} 核查检索台账，无记录直接判不过关。`;

@@ -1383,11 +1383,8 @@ def _save_writing_archive(req: "VaultRetrieveReq", bundle: dict) -> str:
     return str(path)
 
 
-# ── 写稿门禁：检索台账 + 核查 + 飞书通知 ──
+# ── 写稿门禁：检索台账 + 核查 ──
 _RETRIEVE_LEDGER: dict = {}  # session_id -> [{ts, account, query, include_c_level}]
-FEISHU_GATE_WEBHOOK = os.environ.get(
-    "EASEL_FEISHU_GATE_WEBHOOK",
-    "https://open.feishu.cn/open-apis/bot/v2/hook/214feb0b-708e-4a6d-9c0a-1fb57c3d65e6")
 
 
 @app.get("/api/writing/gate")
@@ -1395,31 +1392,6 @@ async def api_writing_gate(session_id: str = ""):
     """门禁核查：该写稿会话是否发生过素材/避坑检索（检索接口台账）。"""
     recs = _RETRIEVE_LEDGER.get(session_id or "", [])
     return {"ok": len(recs) > 0, "retrieve_count": len(recs)}
-
-
-class GateNotifyReq(BaseModel):
-    title: str = ""
-    account: str = ""
-    session_id: str = ""
-    dry_run: bool = False
-
-
-@app.post("/api/writing/gate/notify")
-async def api_writing_gate_notify(req: GateNotifyReq):
-    """门禁重试仍不达标 → 飞书群通知人工处理（dry_run=true 只回显不发）。"""
-    text = ("⛔ 写稿门禁：自动重试后仍未检索素材库，稿件判不通过\n"
-            f"主题：{req.title or '（未记录）'}\n账号：{req.account or '（未记录）'}\n"
-            f"会话：{req.session_id}\n请到工作台查看该会话记录并人工处理。")
-    if req.dry_run:
-        return {"sent": False, "would_send": text}
-    body = json.dumps({"msg_type": "text", "content": {"text": text}}).encode()
-    r = urllib.request.Request(FEISHU_GATE_WEBHOOK, data=body,
-                               headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(r, timeout=10) as resp:
-            return {"sent": True, "status": resp.status}
-    except Exception as e:  # noqa: BLE001
-        return {"sent": False, "error": str(e)[:200]}
 
 
 @app.post("/api/vault/retrieve")
