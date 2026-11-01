@@ -588,7 +588,7 @@ export default function App() {
     setSessions((prev) => { const u = [ns, ...prev]; saveSessions(u); return u; });
     setActiveSessionId(ns.id);
     setCurrentPage('chat');
-    let prompt = `围绕当前热点「${title}」：先判断它适不适合我的账号赛道；若合适，给 2-3 个差异化的二创角度，并把你最推荐的那条写成可直接发布的文案初稿。`;
+    let prompt = `围绕当前热点「${title}」：先判断它适不适合我的账号赛道；若合适，给 2-3 个差异化的二创角度，并把你最推荐的那条写成可直接发布的文案初稿。写稿全程按 skill-gzh-columnist 技能的规范执行（标题钩子五型/爆文结构模板/交付形态/长度约束）。`;
     if (sel) {
       writingGateRef.current[ns.id] = { account: sel.account, title, attempt: 0 };
       prompt += `
