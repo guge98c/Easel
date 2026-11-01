@@ -1115,12 +1115,14 @@ export interface VaultRetrieveResp {
   materials: VaultMaterial[];
   pitfall: string;
   context: string;
+  archive_path?: string | null;
 }
 export function listVaultAccounts(platform: string): Promise<{ platform: string; accounts: string[] }> {
   return request(`/api/vault/accounts?platform=${encodeURIComponent(platform)}`);
 }
 export function retrieveVault(payload: {
   platform: string; account: string; query: string; track?: string; top_k?: number;
+  include_c_level?: boolean; archive?: boolean;
 }): Promise<VaultRetrieveResp> {
   return request('/api/vault/retrieve', {
     method: 'POST',

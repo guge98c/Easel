@@ -554,7 +554,10 @@ export default function App() {
     let prompt = `围绕当前热点「${title}」：先判断它适不适合我的账号赛道；若合适，给 2-3 个差异化的二创角度，并把你最推荐的那条写成可直接发布的文案初稿。`;
     if (sel) {
       try {
-        const res = await retrieveVault({ platform: sel.platform, account: sel.account, query: title });
+        const res = await retrieveVault({
+          platform: sel.platform, account: sel.account, query: title,
+          include_c_level: sel.includeCLevel, archive: true,
+        });
         prompt += `\n\n【素材库检索上下文（来自 Obsidian 素材库 ${sel.platform} / ${sel.account}，仅供参考，按需取用）】\n${res.context}`;
       } catch {
         /* vault 不可用时退回纯 AI 写稿 */

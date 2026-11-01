@@ -1342,12 +1342,62 @@ class VaultRetrieveReq(BaseModel):
     track: str = ""
     top_k: int = 8
     include_c_level: bool = False  # 是否额外加载 C级避坑清单（默认不加载，按需传 True）
+    archive: bool = False  # 写稿桥真实写稿路径传 True：本次检索自动留档《写作档案》
+
+
+def _safe_fname(text: str, limit: int = 24) -> str:
+    """文件名安全化：去掉路径分隔/特殊符号，压成短横线连接。"""
+    t = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "-", (text or "").strip())
+    t = re.sub(r"\s+", "-", t).strip("-.")
+    return (t[:limit] or "untitled")
+
+
+def _save_writing_archive(req: "VaultRetrieveReq", bundle: dict) -> str:
+    """把本次写稿检索自动留档成《写作档案》：命中素材/注入红线/完整上下文，
+    落 outputs/写作档案/{日期}/，产物库可见；发布后按标题与 T+N 复盘对上，可追溯。"""
+    now = datetime.now()
+    day_dir = OUTPUTS_DIR / "写作档案" / now.strftime("%Y-%m-%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{now.strftime('%H%M%S')}-{_safe_fname(req.account, 20)}-{_safe_fname(req.query)}.md"
+    materials = bundle.get("materials") or []
+    lines = [
+        f"# 写作档案 · {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        f"- 平台/账号：{req.platform} / {req.account}" + (f"（赛道：{req.track}）" if req.track else ""),
+        f"- 主题：{req.query}",
+        f"- 检索参数：top_k={req.top_k} · 含C级避坑清单：{'是' if req.include_c_level else '否'}",
+        "- 来源：写稿桥（一键做成内容）",
+        "",
+        f"## 检索命中素材（{len(materials)} 条）",
+        "",
+    ]
+    for i, m in enumerate(materials, 1):
+        text = (m.get("text") or "").strip()
+        lines.append(f"### {i}. {m.get('title', '')}（相关度 {m.get('score')}）")
+        lines.append(f"- 来源：{m.get('source', '')}")
+        lines.append(f"- 摘录：{text[:300]}{'…' if len(text) > 300 else ''}")
+        lines.append("")
+    lines += [
+        "## 注入的红线",
+        "",
+        "- 避坑红线.md：已注入" + ("（另含 C级避坑清单.md）" if req.include_c_level else "（不含 C 级清单，按需加载）"),
+        "",
+        "## 注入写稿指令的完整上下文",
+        "",
+        "```",
+        bundle.get("context") or "（空）",
+        "```",
+    ]
+    path = day_dir / fname
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return str(path)
 
 
 @app.post("/api/vault/retrieve")
 async def api_vault_retrieve(req: VaultRetrieveReq):
     """检索某账号素材库 + 避坑红线，返回素材与可直接注入写稿的上下文。
-    默认只加载 避坑红线.md；include_c_level=True 时额外加载 C级避坑清单.md。"""
+    默认只加载 避坑红线.md；include_c_level=True 时额外加载 C级避坑清单.md。
+    archive=True（写稿桥真实写稿路径）时本次检索自动留档《写作档案》。"""
     try:
         vr = _load_vault_retriever()
     except Exception as e:  # noqa: BLE001
@@ -1359,9 +1409,15 @@ async def api_vault_retrieve(req: VaultRetrieveReq):
                                     include_c_level=req.include_c_level)
     except ValueError as e:  # 平台/账号名非法（含路径穿越尝试）
         raise HTTPException(status_code=400, detail=str(e))
-    return {"platform": req.platform, "account": req.account, "track": track,
+    resp = {"platform": req.platform, "account": req.account, "track": track,
             "query": req.query, "materials": bundle["materials"],
             "pitfall": bundle["pitfall"], "context": bundle["context"]}
+    if req.archive:
+        try:
+            resp["archive_path"] = _save_writing_archive(req, bundle)
+        except Exception:  # 留档失败不阻断写稿
+            resp["archive_path"] = None
+    return resp
 
 
 @app.get("/api/settings/bootstrap")
