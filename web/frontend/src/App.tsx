@@ -20,7 +20,7 @@ import PlatformPicker, { type VaultSelection } from './components/PlatformPicker
 import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat } from './lib/api';
 import type { PersonaItem, UploadedFile, ChatQuestion } from './lib/api';
 import { questionStatus } from './lib/api';
-import { deleteSession as deleteRemoteSession, retrieveVault } from './lib/api';
+import { deleteSession as deleteRemoteSession, checkWritingGate, notifyWritingGate } from './lib/api';
 import {
   loadSessions,
   saveSessions,
@@ -211,6 +211,9 @@ export default function App() {
   const streamCtl = useRef<Record<string, AbortController>>({});
   const streamAcc = useRef<Record<string, { content: string; thinking: string; steps: string[]; questions: ChatQuestion[] }>>({});
   const finalizers = useRef(new Map<string, { owner: object; finish: () => void; timer?: ReturnType<typeof setTimeout> }>());
+  // 写稿门禁：会话号 -> {账号, 主题, 已重试次数}；门禁执行器用 ref 中转（finalizeStream 定义在前）
+  const writingGateRef = useRef<Record<string, { account: string; title: string; attempt: number }>>({});
+  const gateRunnerRef = useRef<((sessionId: string) => void) | null>(null);
   const answeredRef = useRef<Set<string>>(new Set());   // 已提交答案的 question id：重放/恢复不再重现
   // ---- 打字机：分批到达的 token 按节奏吐给界面 ----
   const typingBuf = useRef<Record<string, string>>({});
@@ -293,6 +296,7 @@ export default function App() {
         }, sessionKey);
         clearStream(sessionId);
         try { sessionStorage.removeItem(`easel_pending_turn:${sessionId}`); } catch {}
+        gateRunnerRef.current?.(sessionId);
       },
     };
     finalizers.current.set(sessionId, pending);
@@ -533,6 +537,35 @@ export default function App() {
     sendUserAndStream(sessionId, displayText, attachments);
   }, [sendUserAndStream]);
 
+  // 写稿门禁：写稿会话流结束后核查检索台账——不达标自动打回重试一次，仍不达标飞书通知
+  const runWritingGate = useCallback(async (sessionId: string) => {
+    const st = writingGateRef.current[sessionId];
+    if (!st) return;
+    try {
+      const r = await checkWritingGate(sessionId);
+      if (r.ok) { delete writingGateRef.current[sessionId]; return; }
+      if (st.attempt < 1) {
+        st.attempt += 1;
+        appendAssistant(sessionId, {
+          role: 'assistant',
+          content: '⚠️ 写稿门禁：本会话没有检索记录（素材/避坑红线都未检索），本稿判不过关，已自动打回。请按开头的【素材库检索指引】完成检索后重新交稿。',
+        });
+        sendUserAndStream(sessionId, '门禁打回：刚才的稿件没有检索素材库与避坑红线。请现在按【素材库检索指引】完成检索（curl 调接口，读取返回的避坑红线并对照），检索完成后再重新给出可直接发布的文案初稿。');
+      } else {
+        delete writingGateRef.current[sessionId];
+        appendAssistant(sessionId, {
+          role: 'assistant',
+          content: '⛔ 写稿门禁：自动重试后仍未检测到检索记录，本稿件判不通过，已通知飞书群人工处理。',
+        });
+        await notifyWritingGate({ title: st.title, account: st.account, session_id: sessionId });
+      }
+    } catch { /* 门禁服务不可用时不阻塞会话 */ }
+  }, [appendAssistant, sendUserAndStream]);
+
+  useEffect(() => {
+    gateRunnerRef.current = (sessionId: string) => { void runWritingGate(sessionId); };
+  }, [runWritingGate]);
+
   // 重试/编辑重发：从该用户消息处截断（丢弃它及其之后），用 text 重新发起。
   const handleResend = useCallback((
     sessionId: string,
@@ -549,25 +582,25 @@ export default function App() {
     setDraftTopic(title);
   }, []);
 
-  // 真实写稿：按所选平台+账号从 Obsidian 素材库(vault)检索，注入写稿指令（命中素材 + 避坑红线）
+  // 真实写稿：素材/避坑全部改为「检索指引」——AI 按指引自行检索（不再预检索塞 prompt），门禁核查
   const launchDraft = useCallback(async (title: string, sel: VaultSelection | null) => {
-    let prompt = `围绕当前热点「${title}」：先判断它适不适合我的账号赛道；若合适，给 2-3 个差异化的二创角度，并把你最推荐的那条写成可直接发布的文案初稿。`;
-    if (sel) {
-      try {
-        const res = await retrieveVault({
-          platform: sel.platform, account: sel.account, query: title,
-          include_c_level: sel.includeCLevel, archive: true,
-        });
-        prompt += `\n\n【素材库检索上下文（来自 Obsidian 素材库 ${sel.platform} / ${sel.account}，仅供参考，按需取用）】\n${res.context}`;
-      } catch {
-        /* vault 不可用时退回纯 AI 写稿 */
-        prompt += `\n\n（注：素材库检索暂不可用，已退回纯 AI 写稿）`;
-      }
-    }
     const ns = createSession(selectedPersona || undefined);
     setSessions((prev) => { const u = [ns, ...prev]; saveSessions(u); return u; });
     setActiveSessionId(ns.id);
     setCurrentPage('chat');
+    let prompt = `围绕当前热点「${title}」：先判断它适不适合我的账号赛道；若合适，给 2-3 个差异化的二创角度，并把你最推荐的那条写成可直接发布的文案初稿。`;
+    if (sel) {
+      writingGateRef.current[ns.id] = { account: sel.account, title, attempt: 0 };
+      prompt += `
+
+【素材库检索指引（必须遵守：交稿前未完成检索，稿件直接判不过关并打回）】
+1. 先按你定好的角度确定检索关键词（可 1-3 个、可多轮），在本机执行：
+   curl -s -X POST http://localhost:7860/api/vault/retrieve -H 'Content-Type: application/json' -d '{"platform":"${sel.platform}","account":"${sel.account}","query":"<关键词>","include_c_level":${sel.includeCLevel},"session_id":"${ns.id}"}'
+   接口一次返回：命中素材（含相关度）+ 该账号避坑红线${sel.includeCLevel ? ' + C级避坑清单' : ''}。
+2. 逐条读返回的避坑红线并对照自查；命中素材按需读全文（素材库根目录 /data/vault/ 下 平台/账号/素材.md，可直接浏览）。
+3. 严禁照抄原文连续 16 字。
+本会话交稿时后端会按 session_id=${ns.id} 核查检索台账，无记录直接判不过关。`;
+    }
     sendUserAndStream(ns.id, prompt);
   }, [selectedPersona, sendUserAndStream]);
 

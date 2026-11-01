@@ -1342,7 +1342,8 @@ class VaultRetrieveReq(BaseModel):
     track: str = ""
     top_k: int = 8
     include_c_level: bool = False  # 是否额外加载 C级避坑清单（默认不加载，按需传 True）
-    archive: bool = False  # 写稿桥真实写稿路径传 True：本次检索自动留档《写作档案》
+    archive: bool = False  # 写稿检索时传 True：本次检索留档《写作档案》（按 session_id 追加记账）
+    session_id: str = ""  # 写稿会话号：门禁台账按它记账（AI 按检索指引传入）
 
 
 def _safe_fname(text: str, limit: int = 24) -> str:
@@ -1353,44 +1354,72 @@ def _safe_fname(text: str, limit: int = 24) -> str:
 
 
 def _save_writing_archive(req: "VaultRetrieveReq", bundle: dict) -> str:
-    """把本次写稿检索自动留档成《写作档案》：命中素材/注入红线/完整上下文，
-    落 outputs/写作档案/{日期}/，产物库可见；发布后按标题与 T+N 复盘对上，可追溯。"""
+    """写稿检索留档《写作档案》：带 session_id 时按会话追加记账（一次会话一份档案，
+    每次检索追加一节）；不带则单次成档。落 outputs/写作档案/{日期}/，产物库可见。"""
     now = datetime.now()
     day_dir = OUTPUTS_DIR / "写作档案" / now.strftime("%Y-%m-%d")
     day_dir.mkdir(parents=True, exist_ok=True)
-    fname = f"{now.strftime('%H%M%S')}-{_safe_fname(req.account, 20)}-{_safe_fname(req.query)}.md"
     materials = bundle.get("materials") or []
-    lines = [
-        f"# 写作档案 · {now.strftime('%Y-%m-%d %H:%M:%S')}",
-        "",
-        f"- 平台/账号：{req.platform} / {req.account}" + (f"（赛道：{req.track}）" if req.track else ""),
-        f"- 主题：{req.query}",
-        f"- 检索参数：top_k={req.top_k} · 含C级避坑清单：{'是' if req.include_c_level else '否'}",
-        "- 来源：写稿桥（一键做成内容）",
-        "",
-        f"## 检索命中素材（{len(materials)} 条）",
-        "",
-    ]
+    sec = [f"## 检索 · {now.strftime('%H:%M:%S')}",
+           f"- 关键词：{req.query}",
+           f"- 命中素材 {len(materials)} 条" + (" · 含C级避坑清单" if req.include_c_level else "")]
     for i, m in enumerate(materials, 1):
         text = (m.get("text") or "").strip()
-        lines.append(f"### {i}. {m.get('title', '')}（相关度 {m.get('score')}）")
-        lines.append(f"- 来源：{m.get('source', '')}")
-        lines.append(f"- 摘录：{text[:300]}{'…' if len(text) > 300 else ''}")
-        lines.append("")
-    lines += [
-        "## 注入的红线",
-        "",
-        "- 避坑红线.md：已注入" + ("（另含 C级避坑清单.md）" if req.include_c_level else "（不含 C 级清单，按需加载）"),
-        "",
-        "## 注入写稿指令的完整上下文",
-        "",
-        "```",
-        bundle.get("context") or "（空）",
-        "```",
-    ]
+        sec.append(f"{i}. {m.get('title', '')}（相关度 {m.get('score')}）← {m.get('source', '')}")
+        sec.append(f"   摘录：{text[:200]}{'…' if len(text) > 200 else ''}")
+    if req.session_id:
+        path = day_dir / f"{_safe_fname(req.session_id, 16)}-{_safe_fname(req.account, 20)}.md"
+        if not path.exists():
+            head = [f"# 写作档案 · {req.platform} / {req.account}", "",
+                    f"- 会话：{req.session_id}",
+                    "- 红线/素材方式：AI 按检索指引自行检索（不直塞 prompt）", ""]
+            path.write_text("\n".join(head), encoding="utf-8")
+        with path.open("a", encoding="utf-8") as f:
+            f.write("\n".join([""] + sec + [""]))
+        return str(path)
+    fname = f"{now.strftime('%H%M%S')}-{_safe_fname(req.account, 20)}-{_safe_fname(req.query)}.md"
     path = day_dir / fname
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path.write_text("\n".join([f"# 写作档案 · {now.strftime('%Y-%m-%d %H:%M:%S')}", ""] + sec), encoding="utf-8")
     return str(path)
+
+
+# ── 写稿门禁：检索台账 + 核查 + 飞书通知 ──
+_RETRIEVE_LEDGER: dict = {}  # session_id -> [{ts, account, query, include_c_level}]
+FEISHU_GATE_WEBHOOK = os.environ.get(
+    "EASEL_FEISHU_GATE_WEBHOOK",
+    "https://open.feishu.cn/open-apis/bot/v2/hook/214feb0b-708e-4a6d-9c0a-1fb57c3d65e6")
+
+
+@app.get("/api/writing/gate")
+async def api_writing_gate(session_id: str = ""):
+    """门禁核查：该写稿会话是否发生过素材/避坑检索（检索接口台账）。"""
+    recs = _RETRIEVE_LEDGER.get(session_id or "", [])
+    return {"ok": len(recs) > 0, "retrieve_count": len(recs)}
+
+
+class GateNotifyReq(BaseModel):
+    title: str = ""
+    account: str = ""
+    session_id: str = ""
+    dry_run: bool = False
+
+
+@app.post("/api/writing/gate/notify")
+async def api_writing_gate_notify(req: GateNotifyReq):
+    """门禁重试仍不达标 → 飞书群通知人工处理（dry_run=true 只回显不发）。"""
+    text = ("⛔ 写稿门禁：自动重试后仍未检索素材库，稿件判不通过\n"
+            f"主题：{req.title or '（未记录）'}\n账号：{req.account or '（未记录）'}\n"
+            f"会话：{req.session_id}\n请到工作台查看该会话记录并人工处理。")
+    if req.dry_run:
+        return {"sent": False, "would_send": text}
+    body = json.dumps({"msg_type": "text", "content": {"text": text}}).encode()
+    r = urllib.request.Request(FEISHU_GATE_WEBHOOK, data=body,
+                               headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return {"sent": True, "status": resp.status}
+    except Exception as e:  # noqa: BLE001
+        return {"sent": False, "error": str(e)[:200]}
 
 
 @app.post("/api/vault/retrieve")
@@ -1417,6 +1446,11 @@ async def api_vault_retrieve(req: VaultRetrieveReq):
             resp["archive_path"] = _save_writing_archive(req, bundle)
         except Exception:  # 留档失败不阻断写稿
             resp["archive_path"] = None
+    if req.session_id:  # 门禁台账：按写稿会话记账（上限 50 条防膨胀）
+        _RETRIEVE_LEDGER.setdefault(req.session_id, []).append(
+            {"ts": int(time.time()), "account": req.account, "query": req.query,
+             "include_c_level": req.include_c_level})
+        del _RETRIEVE_LEDGER[req.session_id][:-50]
     return resp
 
 

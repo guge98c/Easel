@@ -143,8 +143,9 @@ export default function PlatformPicker({
                 background: 'var(--bg-elev, #f6f7f9)', border: '1px solid var(--border, #e5e7eb)',
                 borderRadius: 8, padding: '8px 10px',
               }}>
-                已从「{platform} / {account}」检索到 <b>{preview.count}</b> 条相关素材
-                {preview.pitfall ? '，并已带入避坑红线 ✅' : '（该账号暂无避坑红线）'}，将注入写稿指令：
+                预览检索「{platform} / {account}」：命中 <b>{preview.count}</b> 条素材。
+                正式写稿时 AI 将按检索指引自行检索：避坑红线 {preview.pitfall.length} 字
+                {includeCLevel ? '（另含 C 级避坑清单）' : ''}会由 AI 读取对照，素材全文按需取用：
                 <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
                   {preview.items.slice(0, 3).map((m, i) => (
                     <li key={i}>{m.title.slice(0, 40)}{m.title.length > 40 ? '…' : ''}</li>
