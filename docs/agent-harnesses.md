@@ -1,13 +1,76 @@
 # Agent 底座接入与本地测试
 
 Easel 将执行底座与模型供应商分开。Web **设置 → 模型配置 → 对话 → 执行引擎**
-统一选择仅聊天模式、OpenClaw、OpenCode、Codex 或通用 ACP。
-标准安装默认安装并使用 OpenClaw；设置中可切换到已安装的其它底座，不自动安装 Codex / OpenCode。
+统一选择仅聊天模式、OpenClaw、OpenCode、Codex、Hermes 或通用 ACP。
+标准安装默认安装并使用 OpenClaw；设置中可切换到已安装的其它底座，不自动安装 Codex / OpenCode / Hermes。
 仅使用 `--api` 安装或没有任何 Agent 配置的环境回退到仅聊天模式。
 已经保存的底座、旧版连接配置和已有 OpenClaw 安装继续生效，不自动切换。
 改动目前用于本地验证，不要求迁移原有凭证。
 
-底座决定谁负责执行对话和工具，连接由适配器自动管理。Codex、OpenCode、通用 ACP
+在 OpenClaw 配置下看到「本机 Agent → Codex CLI」时，可点击 **配置 Codex** 跳转到
+独立执行引擎的配置预览。这个入口不会立即切换：检查模型与沙箱设置，点击
+**保存底座** 后再新建对话。Codex 的认证沿用原生 CLI 配置，不会写进 OpenClaw 的
+provider。检测到可执行文件或成功读取模型列表都不代表认证及模型访问已验证，
+应以一次真实对话成功完成为准。
+
+## Codex 完整使用流程
+
+1. 在设置中选择 Codex，点击「登录 Codex」，在自动打开的官方页面完成 ChatGPT
+   授权。Easel 会自动更新登录状态；已经登录的用户无需重复登录。
+   也可在启动 Easel 的同一账户下运行 `codex login`。
+2. 点击「拉取模型」，选择模型。「推理强度」选项来自该模型的原生列表；留空沿用
+   Codex 配置，更换模型时回到默认。Easel 不修改原生配置文件。
+3. 「Codex 连接」读取登录类型和可用的额度窗口；登录状态、模型目录和推理可用性
+   是三个不同的检查。自定义供应商可以不需要 OpenAI 登录；未提供额度窗口不表示额度为零。
+4. 点击「测试连接」，用当前预览模型及强度发起一次简短推理。测试使用独立临时会话、
+   只读权限、不接受额外授权，不修改 Easel 设置或聊天历史，会消耗少量模型用量。
+5. 点击「保存底座」再新建对话。上传 PNG / JPEG / WebP / GIF 时，经过会话归属及
+   路径校验的附件以 Codex 原生 `localImage` 传入。其它附件保留文件清单，由工具或技能处理。
+
+执行过程显示命令开始与结束、退出码、修改文件、计划进度，以及原生报告的会话累计
+token 用量（输入、输出、缓存输入）。这个统计不是费用估算，也不能把原生 `last`
+模型请求的用量误当作整个工具执行轮的用量。原生 CLI 没有报告时不编造数字。
+登录过期、额度耗尽、限流、模型/强度不支持、网络错误和超时分别给出处理建议；
+原生 stderr 只做有界分类，不回显原文。状态接口不返回邮箱、令牌或余额详情。
+
+登录授权由 Codex 原生接口管理，凭证由其自身保存，Easel 不接收账号密码或迁移认证。已有的逐次授权、
+显式停止、流式断线重连和原生会话续接机制继续生效；网页断线不会取消后台任务。
+停止或服务关闭后不会自动重发提示词，避免重复执行有副作用的操作。
+
+相关设置为 `outputs/_harness/config.json` 中的 `models.codex`、`codex_effort`、
+`sandbox` 和 `codex_auto_approve`。设置页的「刷新状态」与「测试连接」也可分别通过
+`GET /api/settings/harness/codex/status`、`POST /api/settings/harness/codex/probe`
+调用；后者接受 `model` 和 `effort`，同时只允许一个连接测试。
+
+协议字段可用当前 Codex CLI 的 `codex app-server generate-json-schema --experimental --out <临时目录>`
+核对；该命令仅生成 schema，不登录或调用模型。不同 CLI 版本的可用功能可能不同。
+
+### 网页登录
+
+「登录 Codex」使用原生 `account/login/start` 的浏览器流程，等待匹配该次请求的
+`account/login/completed` 后刷新状态。浏览器拦截新窗口时，可以点击「打开官方登录页」。
+远程部署或本地回跳不通时，可取消当前尝试，再使用「验证码登录」：在官方页面输入
+设置页展示的验证码。账号可能需要先在 ChatGPT 安全设置中启用设备代码登录。
+
+同一 Easel 服务同时只保留一次登录尝试。关闭设置或刷新网页后，可以继续查看该次
+登录进度；等待超过 10 分钟、主动取消或服务退出时会清理登录进程。取消操作不调用
+退出账号接口。登录期间暂停新的 Codex 对话和连接测试，完成后刷新原生连接。
+失败提示不回显原始 OAuth 错误，官方登录链接和验证码不写入项目文件或日志。
+
+登录成功后同一处会显示「退出登录」。确认后 Easel 调用 Codex 原生
+`account/logout`，退出当前操作系统账户保存的 Codex 账号；它不会删除 Easel 对话、
+内容项目、模型选择或附件。退出期间不会自动注销 B 站等平台账号；再次点击「登录
+Codex」即可重新授权。正在执行对话、连接测试或登录时，退出请求会被拒绝，避免
+中途撤销凭证导致本轮状态不一致。退出操作结束前禁止新的 Codex 对话、账号操作、
+连接测试及底座设置变更；其它窗口可以查看退出进度，完成后刷新账号状态。
+退出请求失败或中断时显示结果待确认，请刷新原生账号状态，不假定凭证仍有效。
+
+此入口面向本机运行的 Easel；登录绑定运行服务的操作系统账户，不能用来隔离多人
+共用服务器时各自的账号。它也不代替 Codex 的安装。API 为
+`GET/POST /api/settings/harness/codex/login` 和
+`POST /api/settings/harness/codex/login/cancel`，后者必须携带当前尝试的 `id`。
+
+底座决定谁负责执行对话和工具，连接由适配器自动管理。Codex、OpenCode、Hermes、通用 ACP
 不需要再选择 API / OpenClaw 连接方式；模型供应商与认证沿用各自原生 CLI 配置。
 原有 API 直连整合为执行引擎列表中的 **仅聊天模式**，不再单独展示连接方式。
 选择框右侧的说明图标支持悬停和键盘聚焦，说明它直接调用模型 API、不启动 Agent，
@@ -54,6 +117,7 @@ OpenClaw 会话与供应商设置。内部 `Adapter.run` 契约统一事件、�
 | OpenClaw | 保留现有 gateway / CLI 路径 | 原有 OpenClaw 配置 | 原有策略 |
 | OpenCode | `opencode acp`，私有 stdio ACP v1 | `opencode auth login` | OpenCode 原生策略，ACP 权限请求交由 Web 确认 |
 | Codex | `codex app-server`，私有 stdio 原生 RPC | `codex login` 或原生配置 | 默认 workspace-write，网络受限；额外授权需逐次确认 |
+| Hermes Agent | `hermes --profile easel acp`，私有 stdio ACP v1 | 由 Hermes 的独立 `easel` profile 管理 | Hermes 原生策略；Easel 权限确认只提供允许本次 / 拒绝 |
 | 通用 ACP | 本机管理员配置的 argv | 对应 Agent 原生登录 | 对应 Agent 原生策略，不声称提供操作系统沙箱 |
 
 Codex 不必通过第三方 ACP 桥接，以免丢失原生流式事件和权限控制。ACP 作为可复用适配器，
@@ -79,7 +143,7 @@ Windows PowerShell：
 .\setup.ps1 -OpenClaw -NonInteractive
 ```
 
-安装后运行 `easel web`，在「设置 → Agent 底座 → 执行引擎」选择已检测到的 Codex / OpenCode，
+安装后运行 `easel web`，在「设置 → Agent 底座 → 执行引擎」选择已检测到的 Codex / OpenCode / Hermes，
 保存后新建对话。跳过 OpenClaw 的新安装初始为「仅聊天模式」，只需使用已有原生 Agent 时，
 无需填写 OpenClaw 的 API Key；尚未选择 Agent 时也可以进入 Web、管理配置与账号，
 但对话需选择已认证的 Agent 或配置仅聊天模式的模型 API。
@@ -95,7 +159,34 @@ npm install -g @opencode/cli
 opencode auth login
 npm install -g @openai/codex
 codex login
+# Linux / macOS: official Hermes installer; Windows: use the official PowerShell installer
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+# Windows: https://hermes-agent.nousresearch.com/docs/getting-started/installation
+hermes pm install --extra acp
+hermes profile list
 ```
+
+若列表中没有 `easel`，再运行：
+
+```bash
+hermes profile create easel --no-skills
+```
+
+已有同名 profile 时先确认其用途和状态，不要覆盖或删除。确认该 profile 可用后，在其中完成模型供应商登录：
+
+```bash
+hermes --profile easel setup
+```
+
+Easel 只以 Hermes CLI 的 `--profile easel` 启动 `acp` 和 `acp --check`，不会读取、复制或改写默认 Hermes profile 的配置与凭证；Easel 也不会把自身 `.env` 中的模型/API 凭证传给 Hermes。Hermes profile 隔离的是 Hermes 自己的配置、会话、记忆和技能，不是操作系统沙箱；工具仍以运行 Easel 的账户权限访问该账户可读写的文件，权限策略仍由 Hermes 管理。安装向导 `setup.sh` / `setup.ps1` 不负责安装 Hermes。
+
+将内置技能安全地复制到该 profile 的 Hermes home：
+
+```bash
+python -m easel.commands.hermes_skills
+```
+
+脚本通过 `hermes --profile easel config path` 确认 profile 目录，并校验它属于所选的 Hermes 根目录。支持显式 `HERMES_HOME`、Linux/macOS 的 `~/.hermes`，以及 Windows 的 `%LOCALAPPDATA%/hermes` 与传统 `~/.hermes` 布局；已有 `HERMES_HOME` 指向另一 profile 时，仍在同一根目录选择 `easel`。只有在 `easel` profile 已存在时才复制缺失技能；复制先完成到临时目录，中途失败不留下半截技能，不复制运行时 `.env`、Cookie 或公众号凭据文件，也不会创建不完整 profile。遇到同名技能目录会保留原文件并跳过，不删除额外技能。如需更新某个 Easel 副本，先自行备份并移走那个目录，再运行同步命令。
 
 CLI 需要在 Web 的 PATH 中。`easel web` 在非交互启动遗漏 PATH 时，会补充当前服务器账户下
 常见的 npm、nvm、fnm、Volta、用户本地与 OpenCode 安装目录，包括自定义 npm 前缀、
@@ -161,9 +252,10 @@ Web 不提供任意命令输入。内容是 JSON argv 数组，不走 shell。�
 - 执行引擎选择 OpenClaw 或仅聊天模式后，会立即显示该引擎自己的 API 配置，
   不需要先切换正在使用的底座。修改 API 前先点击“保存底座”，再保存下方配置；
   仅预览不会更改当前引擎、密钥或模型。
-- Codex 和 OpenCode 的“模型覆盖”提供下拉框，点击“拉取模型”才启动原生 CLI
-  读取列表，不创建对话，也不在打开设置时自动读取。Codex 使用 `model/list`，
-  OpenCode 使用 `opencode models`；列表由原生配置提供，不代表每个模型都已授权可用。
+- Codex、OpenCode 和 Hermes 的“模型覆盖”提供下拉框，点击“拉取模型”才启动原生 CLI
+  读取列表，不在打开设置时自动读取。Codex 使用 `model/list`，OpenCode 使用 `opencode models`，
+  Hermes 从 ACP `session/new.models.availableModels` 读取；Hermes 查询使用独立的短暂 ACP 进程和会话，不发送提示词或复用聊天进程。
+  列表由原生配置提供，不代表每个模型都已授权可用。
 - 可选择其它 GPT 模型或 OpenCode 供应商模型，也可手动填写模型 ID；
   留空沿用原生 CLI 默认模型。保存后请新建对话，原有历史仍绑定原底座与会话。
   读取列表失败时保留原有模型设置；原生认证仍由对应 CLI 管理。
@@ -224,3 +316,5 @@ Windows 启动入口通过单元测试验证，尚未在真实 Windows 系统做
   实际 App 扫码与确认仍需用户验收，不承诺解除平台维护或服务器出口风控。
 - 完整 Python 回归 881 项通过、9 项跳过；前端 33 项测试通过，生产构建成功。
   lint 保留两条已有警告，构建有 bundle 体积提示。README 未修改，未提交或推送。
+
+持久化聊天状态与恢复见 [任务恢复说明](agent-run-store.md)。API 直连及所有执行引擎均只恢复已保存的状态与结果；结果未知时不会自动重新发送提示词或重放工具。Hermes 的 `session/load` 失败时不会自动创建替代会话。

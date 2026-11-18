@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <strong>简体中文</strong> · <a href="README_EN.md">English</a>
+  <strong>简体中文</strong> · <a href="README_EN.md">English</a> · <a href="README_JA.md">日本語</a>
 </p>
 
 <p align="center">
@@ -381,6 +381,8 @@ Easel/
 
 Easel 使用独立的 `easel` OpenClaw profile，不会覆盖你本机已有的 OpenClaw 配置。Web 默认运行在 `7860`；gateway 端口由 OpenClaw 决定（非默认 profile 会分配哈希端口，如 `easel` → `37289`，不是 `18789`），Easel 会自动解析，无需手配。
 
+也可在「设置 → Agent 底座」选择 Hermes Agent。手动安装 Hermes 并启用 ACP：`hermes pm install --extra acp`；先用 `hermes profile list` 检查 `easel` profile，若不存在再运行 `hermes profile create easel --no-skills`，随后用 `hermes --profile easel setup` 配置。已有同名 profile 时先确认用途和状态，不要覆盖或删除。Easel 通过 Hermes CLI 选择该 profile，模型凭证仍由 Hermes 管理，不会复制默认 profile 或 Easel `.env` 中的模型凭证。profile 隔离 Hermes 自身配置和会话，不是操作系统沙箱；工具仍以运行 Easel 的账户权限访问文件。运行 `python -m easel.commands.hermes_skills` 可将缺失的内置技能目录复制到该 profile；脚本会通过 Hermes CLI 解析准确路径，且已有同名技能会原样保留。详见[Agent 底座配置](docs/agent-harnesses.md)。
+
 ## 📑 文档
 
 - [热点数据源接入：Python 脚本 / HTTP 服务 / RSS 订阅](docs/trend-collectors.md)
@@ -399,7 +401,7 @@ Easel 使用独立的 `easel` OpenClaw profile，不会覆盖你本机已有的 
 - [ ] **1. 适配 Windows 系统** —— 完善原生 Windows 下安装、路径与编码、浏览器发布等全链路兼容。
 - [ ] **2. 安装简易化** —— 降低上手门槛，减少手动步骤，提供更顺滑的一键安装体验。
 - [ ] **3. 优化页面 Agent 交互** —— 改进 Web 工作台的对话交互、加载逻辑与流式反馈等体验细节。
-- [ ] **4. 适配更多 Agent Harness** —— 支持 OpenClaw 之外的更多 Agent 运行框架，例如 Claude Code、DeepSeek harness、Codex 等。
+- [ ] **4. 适配更多 Agent Harness** —— 完善现有 Codex / OpenCode 接入，并适配 Claude Code、DeepSeek harness 等更多运行框架。已有引擎的切换方式见 [Agent 底座接入](docs/agent-harnesses.md)。
 
 ## 🙏 致谢
 

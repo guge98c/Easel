@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+from dataclasses import replace
 
 from easel import __version__
 
 from .base import HarnessError, RunRequest
 from .commands import base_command
-from .rpc import RPC
+from .rpc import RPC, connection
 
 
 def _valid_id(value):
@@ -18,7 +19,42 @@ def _valid_id(value):
 
 
 async def available_models(runtime: str, request: RunRequest) -> list[dict]:
-    if runtime == "codex":
+    if runtime == "hermes":
+        from .commands import hermes_command
+        from .hermes import HermesAdapter
+
+        async def reject(method, params):
+            raise HarnessError("读取模型列表时不允许执行工具")
+
+        command = list(hermes_command(profile="easel"))
+        profile_request = replace(request, env=HermesAdapter._profile_env(request.env), command=(),
+                                  session_key="", native_id="")
+        async with connection(profile_request, command, lambda method, params: None, reject, acp=True) as rpc:
+            initialized = await rpc.call("initialize", {
+                "protocolVersion": 1, "clientInfo": {"name": "easel", "version": __version__},
+                "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False},
+                                       "terminal": False}}, timeout=15)
+            if not isinstance(initialized, dict) or initialized.get("protocolVersion") != 1:
+                raise HarnessError("Hermes 不支持 ACP v1")
+            result = await rpc.call("session/new", {"cwd": str(request.cwd), "mcpServers": []}, timeout=30)
+            if not isinstance(result, dict) or not isinstance(result.get("models"), dict):
+                raise HarnessError("Hermes 未返回有效的原生模型列表，请检查 profile 和 ACP 版本")
+            models_result = result.get("models") or {}
+            available = models_result.get("availableModels") or []
+            if not isinstance(available, list) or len(available) > 2000:
+                raise HarnessError("Hermes 返回了无效或过大的原生模型列表")
+            current = models_result.get("currentModelId")
+            models = []
+            for item in available:
+                if not isinstance(item, dict):
+                    continue
+                identifier = item.get("modelId") or item.get("id")
+                if _valid_id(identifier):
+                    label = item.get("name") or item.get("displayName") or identifier
+                    models.append({"id": identifier,
+                                   "label": label if _valid_id(label) else identifier,
+                                   "default": identifier == current})
+    elif runtime == "codex":
         async def reject(method, params):
             raise HarnessError("读取模型列表时不允许执行工具")
 
@@ -46,6 +82,16 @@ async def available_models(runtime: str, request: RunRequest) -> list[dict]:
                         models.append({"id": identifier,
                                        "label": label if _valid_id(label) else identifier,
                                        "default": bool(item.get("isDefault"))})
+                        if isinstance(item.get("supportedReasoningEfforts"), list):
+                            from .store import CODEX_EFFORTS
+                            models[-1]["efforts"] = list(dict.fromkeys(
+                                option["reasoningEffort"] for option in item["supportedReasoningEfforts"]
+                                if isinstance(option, dict) and option.get("reasoningEffort")
+                                and option.get("reasoningEffort") in CODEX_EFFORTS))
+                            models[-1]["defaultEffort"] = item.get("defaultReasoningEffort", "")
+                        if isinstance(item.get("inputModalities"), list):
+                            models[-1]["inputModalities"] = [value for value in item["inputModalities"]
+                                                             if value in ("text", "image")]
                 following = response.get("nextCursor")
                 if not following or following == cursor:
                     break

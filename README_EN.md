@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> · <strong>English</strong>
+  <a href="README.md">简体中文</a> · <strong>English</strong> · <a href="README_JA.md">日本語</a>
 </p>
 
 <p align="center">
@@ -320,6 +320,8 @@ Easel/
 
 Easel uses an isolated `easel` OpenClaw profile and does not overwrite an existing OpenClaw setup. The Web workspace defaults to port `7860`; the gateway port is chosen by OpenClaw (non-default profiles get a hashed port — `easel` → `37289`, not `18789`) and is resolved automatically by Easel.
 
+Hermes Agent is also available in **Settings → Agent runtime**, through its native ACP server and a separate `easel` profile. Credentials stay in Hermes; the default OpenClaw setup remains available. See [the Harness guide](docs/agent-harnesses.md).
+
 ## 📑 Documentation
 
 - [Trend collectors: Python scripts / HTTP services / RSS feeds (Chinese)](docs/trend-collectors.md)
@@ -337,7 +339,7 @@ Ordered by priority — contributions welcome; feel free to claim or add items v
 - [ ] **1. Windows support** — Complete native Windows compatibility across installation, paths/encoding, and browser publishing.
 - [ ] **2. Simpler installation** — Lower the barrier to entry with fewer manual steps and a smoother one-click setup.
 - [ ] **3. Better in-app Agent UX** — Improve the Web workbench's chat interaction, loading logic, and streaming feedback.
-- [ ] **4. More Agent harnesses** — Support agent runtimes beyond OpenClaw, e.g. Claude Code, DeepSeek harness, Codex.
+- [ ] **4. More Agent harnesses** — Improve the existing Codex / OpenCode integrations and support additional runtimes such as Claude Code and DeepSeek harness. See [Agent harness integration](docs/agent-harnesses.md) for switching between existing engines.
 
 ## 🙏 Acknowledgments
 

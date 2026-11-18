@@ -2,16 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import { fetchHarnessModels, fetchHarnessSettings, saveHarnessSettings } from '../lib/api';
 import type { HarnessModel, HarnessSettingsResponse } from '../lib/api';
 import SettingsSelect from './SettingsSelect';
+import CodexConnection from './CodexConnection';
 
-export default function HarnessSettings({ onChange, onSelect }: {
+export default function HarnessSettings({ onChange, onSelect, previewRequest, onPreviewHandled }: {
   onChange: (runtime: string) => void;
   onSelect: (runtime: string) => void;
+  previewRequest?: { runtime: string };
+  onPreviewHandled?: () => void;
 }) {
   const [settings, setSettings] = useState<HarnessSettingsResponse | null>(null);
   const [runtime, setRuntime] = useState('api');
   const [model, setModel] = useState('');
   const [sandbox, setSandbox] = useState('workspace-write');
   const [autoApprove, setAutoApprove] = useState(false);
+  const [effort, setEffort] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const [catalogs, setCatalogs] = useState<Record<string, HarnessModel[]>>({});
@@ -20,6 +24,7 @@ export default function HarnessSettings({ onChange, onSelect }: {
   const [refresh, setRefresh] = useState(0);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const modelRequest = useRef(0);
+  const handledPreview = useRef<{ runtime: string } | undefined>(undefined);
 
   useEffect(() => {
     let alive = true;
@@ -32,6 +37,7 @@ export default function HarnessSettings({ onChange, onSelect }: {
       setModel(value.models[value.runtime] || '');
       setSandbox(value.sandbox);
       setAutoApprove(value.codex_auto_approve ?? false);
+      setEffort(value.codex_effort || '');
       onChange(value.runtime);
       onSelect(value.runtime);
     }).catch((error) => {
@@ -41,6 +47,27 @@ export default function HarnessSettings({ onChange, onSelect }: {
     });
     return () => { alive = false; modelRequest.current += 1; };
   }, [onChange, onSelect, refresh]);
+
+  // A detected local CLI opens a preview here; saving remains the only mutation.
+  useEffect(() => {
+    if (!previewRequest || previewRequest === handledPreview.current || settingsLoading || !settings || busy) return;
+    handledPreview.current = previewRequest;
+    onPreviewHandled?.();
+    if (settings.locked) {
+      setNote('启动环境已固定底座，无法切换执行引擎。');
+      return;
+    }
+    const agent = settings.agents.find((item) => item.id === previewRequest.runtime);
+    if (!agent) return;
+    setRuntime(agent.id);
+    setModel(settings.models[agent.id] || '');
+    setEffort(settings.codex_effort || '');
+    modelRequest.current += 1;
+    setModelLoading(false);
+    setModelNote('');
+    setNote('');
+    onSelect(agent.id);
+  }, [previewRequest, settingsLoading, settings, busy, onSelect, onPreviewHandled]);
 
   const selected = settings?.agents.find((agent) => agent.id === runtime);
   const nativeModels = catalogs[runtime] || [];
@@ -66,7 +93,8 @@ export default function HarnessSettings({ onChange, onSelect }: {
     setBusy(true);
     setNote('');
     try {
-      const value = await saveHarnessSettings(runtime, model, sandbox, runtime === 'codex' ? autoApprove : undefined);
+      const value = await saveHarnessSettings(runtime, model, sandbox, runtime === 'codex' ? autoApprove : undefined,
+        runtime === 'codex' ? effort : undefined);
       setSettings(value);
       onChange(value.runtime);
       setNote('已保存，请新建对话；旧对话仍保留在原底座，不迁移历史。');
@@ -101,6 +129,7 @@ export default function HarnessSettings({ onChange, onSelect }: {
               onChange={(value) => {
                 setRuntime(value);
                 setModel(settings?.models[value] || '');
+                setEffort(settings?.codex_effort || '');
                 modelRequest.current += 1;
                 setModelLoading(false);
                 setModelNote('');
@@ -113,7 +142,7 @@ export default function HarnessSettings({ onChange, onSelect }: {
               <span id="chat-only-help" className="settings-help-tooltip" role="tooltip">
                 仅聊天模式直接调用模型 API，适合问答、写作和内容分析，不启动 Agent，
                 不能操作本机文件、运行命令、使用浏览器或执行技能。请在下方配置模型、API 地址和 Key；
-                需要工具时可切换到 OpenClaw、OpenCode、Codex 或其它 Agent。切换后请新建对话，旧历史保留。
+                需要工具时可切换到 OpenClaw、OpenCode、Codex、Hermes 或其它 Agent。切换后请新建对话，旧历史保留。
               </span>
             </span>
           </div>
@@ -121,6 +150,7 @@ export default function HarnessSettings({ onChange, onSelect }: {
             : runtime === 'openclaw' ? 'OpenClaw 的模型、API 地址和 Key 在下方配置，保存后同步到 gateway'
             : `${selected?.protocol || ''} · 连接由适配器管理，无需另选连接方式`}</p>
           <p className="desc">安装时可选择 OpenClaw，也可先跳过，进入这里选择已安装的其它引擎。选择引擎可查看对应配置，只有「保存底座」才切换；认证沿用各引擎自身配置。</p>
+          {runtime === 'hermes' && <p className="desc">Hermes 使用独立的 easel profile；请按安装提示创建并配置它。Easel 不复制默认 profile 的配置或凭证。</p>}
           {selected && !selected.installed && (
             <p className="desc" role="status">未检测到 {selected.label}。请确认 CLI 已安装在运行 Web 的服务器账户下，并检查启动 PATH；
               安装或调整路径后重启 Web。原有配置未删除，安装前不能保存为执行引擎。</p>
@@ -133,7 +163,7 @@ export default function HarnessSettings({ onChange, onSelect }: {
           <div className="settings-field">
             <label className="settings-field-label" htmlFor="harness-model">模型覆盖</label>
             <div className="settings-field-body">
-              {(runtime === 'codex' || runtime === 'opencode') && (
+              {(runtime === 'codex' || runtime === 'opencode' || runtime === 'hermes') && (
                 <div className="settings-native-models">
                   <SettingsSelect label="原生模型" value={model} disabled={busy || settings?.locked}
                     options={[
@@ -142,14 +172,15 @@ export default function HarnessSettings({ onChange, onSelect }: {
                         label: `${item.label}${item.default ? '（原生默认）' : ''}` })),
                       ...(model && !nativeModels.some((item) => item.id === model)
                         ? [{ value: model, label: `${model}（当前 / 自定义）` }] : []),
-                    ]} onChange={setModel} />
+                    ]} onChange={(value) => { setModel(value); setEffort(''); }} />
                   <button className="btn btn-sm" disabled={modelLoading || busy || !selected?.installed}
                     onClick={() => void pullModels()}>{modelLoading ? '读取中…' : '拉取模型'}</button>
                 </div>
               )}
               <input id="harness-model" className="mock" value={model} disabled={busy || settings?.locked} maxLength={240}
-              onChange={(event) => setModel(event.target.value)}
-              placeholder={runtime === 'codex' ? '留空使用 Codex 原生配置' : 'provider/model；留空使用原生配置'} />
+              onChange={(event) => { setModel(event.target.value); setEffort(''); }}
+              placeholder={runtime === 'codex' ? '留空使用 Codex 原生配置'
+                : runtime === 'hermes' ? '留空使用 Hermes 原生配置' : 'provider/model；留空使用原生配置'} />
               <p className="desc">可从原生 CLI 列表选择，也可手动填写；留空沿用原生默认模型，不修改其它底座的供应商配置。
                 模型是否可用仍取决于当前账号、供应商和原生 CLI 支持。</p>
               {modelNote && <p className="desc" role="status">{modelNote}</p>}
@@ -157,6 +188,21 @@ export default function HarnessSettings({ onChange, onSelect }: {
           </div>
           {runtime === 'codex' && (
             <>
+            <div className="settings-field">
+              <span className="settings-field-label">推理强度</span>
+              <div className="settings-field-body">
+                <SettingsSelect label="Codex 推理强度" value={effort} disabled={busy || settings?.locked}
+                  options={[
+                    { value: '', label: '使用原生默认强度' },
+                    ...((nativeModels.find(item => model ? item.id === model : item.default)?.efforts || [])
+                      .map(value => ({ value, label: value }))),
+                    ...(effort && !(nativeModels.find(item => model ? item.id === model : item.default)?.efforts || []).includes(effort)
+                      ? [{ value: effort, label: `${effort}（已保存，请拉取模型核对）` }] : []),
+                  ]} onChange={setEffort} />
+                <p className="desc">拉取模型后显示该模型支持的强度；更换模型时恢复默认，避免沿用不兼容的选项。</p>
+              </div>
+            </div>
+            <CodexConnection model={model} effort={effort} disabled={!selected?.installed || settingsLoading} />
             <div className="settings-field">
               <span className="settings-field-label">Codex 沙箱</span>
               <div className="settings-field-body">
@@ -188,8 +234,11 @@ export default function HarnessSettings({ onChange, onSelect }: {
           )}
           <p className="desc">认证由原生 CLI 管理，Easel 不迁移密钥。未自动批准的额外权限需在对话中确认；
             OpenCode / 通用 ACP 使用其原生权限策略，不是 Codex 沙箱。</p>
-          <p className="desc"><code>{selected?.install_hint}</code></p>
-          <p className="desc">“已安装”仅表示找到 CLI，不代表模型已登录；保存后请发送消息验证。</p>
+          {!selected?.installed && <p className="desc"><code>{selected?.install_hint}</code></p>}
+          {runtime === 'hermes' && <p className="desc">Easel 固定使用 Hermes 的独立 easel profile；认证仍由 Hermes 管理。请先创建并配置该 profile，再把 Easel 技能同步到它的 HERMES_HOME。</p>}
+          <p className="desc">{runtime === 'codex'
+            ? '登录后可点击「测试连接」确认模型可用，再保存底座并新建对话。'
+            : '“已安装”仅表示找到 CLI，不代表模型已登录；保存后请发送消息验证。'}</p>
         </>
       )}
       {settings?.locked && <p className="desc">启动环境 EASEL_AGENT_RUNTIME 已固定底座，请修改启动环境后重启。</p>}

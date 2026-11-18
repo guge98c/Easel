@@ -6,8 +6,11 @@ import time
 
 
 runtime = sys.argv[1]
-mode = os.environ.get("FAKE_HARNESS_MODE", "normal")
-audit = os.environ["FAKE_HARNESS_AUDIT"]
+arguments = sys.argv[2:]
+mode = next((arg.split("=", 1)[1] for arg in arguments if arg.startswith("--fake-mode=")),
+            os.environ.get("FAKE_HARNESS_MODE", "normal"))
+audit = next((arg.split("=", 1)[1] for arg in arguments if arg.startswith("--fake-audit=")),
+             os.environ.get("FAKE_HARNESS_AUDIT", os.path.join(os.getcwd(), "audit.jsonl")))
 thread_id = "native-thread"
 turn_id = "native-turn"
 session_id = "native-session"
@@ -15,7 +18,7 @@ pending_prompt = None
 
 
 def send(message):
-    if runtime == "acp":
+    if runtime in ("acp", "hermes"):
         message = {"jsonrpc": "2.0", **message}
     print(json.dumps(message), flush=True)
 
@@ -56,8 +59,39 @@ while True:
         reply(message, {"protocolVersion": 1, "agentCapabilities": {"loadSession": mode != "no-resume"}})
     elif method == "initialized":
         pass
+    elif method == "account/read":
+        reply(message, {"account": None if mode in ("logged-out", "external") else {
+            "type": "chatgpt", "email": "private@example.test", "accessToken": "do-not-expose"},
+            "requiresOpenaiAuth": mode != "external"})
+    elif method == "account/login/start":
+        result = {"type": message["params"]["type"], "loginId": "native-login"}
+        if message["params"]["type"] == "chatgptDeviceCode":
+            result.update(verificationUrl="https://auth.openai.com/codex/device", userCode="TEST-1234")
+        else:
+            result["authUrl"] = "https://chatgpt.com/fake-login?state=test"
+        if mode == "login-bad-url":
+            result["authUrl"] = "https://evil.example/steal"
+        if mode in ("login-success", "login-failure"):
+            send({"method": "account/login/completed", "params": {
+                "loginId": "native-login", "success": mode == "login-success", "error": "private-token"}})
+        send({"method": "account/login/completed", "params": {"loginId": "unrelated", "success": True}})
+        reply(message, result)
+    elif method == "account/login/cancel":
+        reply(message, {"status": "canceled"})
+        send({"method": "account/login/completed", "params": {
+            "loginId": "native-login", "success": False, "error": "private-token"}})
+    elif method == "account/rateLimits/read":
+        if mode == "quota-unavailable":
+            send({"id": message["id"], "error": {"message": "private-token quota unavailable"}})
+        else:
+            reply(message, {"rateLimits": {"primary": {"usedPercent": 25,
+                "windowDurationMins": 300, "resetsAt": 1900000000, "secret": "do-not-expose"}}})
     elif method == "model/list":
-        if mode == "models-error":
+        if mode == "capabilities":
+            reply(message, {"data": [{"model": "test-model", "isDefault": True,
+                "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "high"}],
+                "defaultReasoningEffort": "high", "inputModalities": ["text", "image"]}]})
+        elif mode == "models-error":
             send({"id": message["id"], "error": {"message": "invalid secret-test-key"}})
         elif message["params"].get("cursor"):
             reply(message, {"data": [{"model": "second-model", "displayName": "Second"},
@@ -73,9 +107,18 @@ while True:
     elif method in ("session/new", "session/load"):
         if method == "session/load":
             session_id = "replacement" if mode == "wrong-resume" else message["params"]["sessionId"]
-        reply(message, {"sessionId": session_id,
-                        "configOptions": [{"category": "model", "id": "model", "type": "select"}]})
-    elif method == "session/set_config_option":
+        result = {"sessionId": session_id,
+                  "configOptions": [{"category": "model", "id": "model", "type": "select"}]}
+        if runtime == "hermes" and method == "session/new":
+            result["models"] = {"availableModels": [
+                {"modelId": "provider/alpha", "name": "Alpha"},
+                {"modelId": "provider/beta"}], "currentModelId": "provider/alpha"}
+        if method == "session/load" and mode == "null-resume":
+            result = None
+        elif method == "session/load" and mode == "empty-resume":
+            result = {}
+        reply(message, result)
+    elif method in ("session/set_config_option", "session/set_model"):
         reply(message, {})
     elif method in ("turn/interrupt", "session/cancel"):
         if method == "session/cancel" and pending_prompt is not None and mode != "ignore-cancel":
@@ -96,17 +139,35 @@ while True:
             continue
         if mode == "exit":
             sys.exit(0)
+        if mode == "stderr-exit":
+            print("401 unauthorized do-not-expose", file=sys.stderr, flush=True)
+            time.sleep(0.05)
+            sys.exit(1)
         if mode == "error":
             send({"id": message["id"], "error": {"code": -32000, "message": "invalid model secret-test-key"}})
             continue
         if runtime == "codex":
             common = {"threadId": thread_id, "turnId": turn_id, "itemId": "text"}
+            if mode == "progress":
+                progress_command = os.environ.get("FAKE_PROGRESS_COMMAND", "cat README.md")
+                for method, item in [
+                    ("item/started", {"type": "commandExecution", "command": progress_command}),
+                    ("item/completed", {"type": "commandExecution", "command": progress_command, "exitCode": 0}),
+                    ("item/completed", {"type": "fileChange", "status": "completed", "changes": [{"path": "outputs/draft.txt"}]}),
+                ]:
+                    send({"method": method, "params": {**common, "item": item}})
+                for owner, tokens in [(thread_id, 123), ("other-thread", 9999)]:
+                    send({"method": "thread/tokenUsage/updated", "params": {
+                        "threadId": owner, "turnId": turn_id, "tokenUsage": {
+                            "total": {"totalTokens": tokens, "inputTokens": 100, "outputTokens": 23,
+                                      "cachedInputTokens": 50}}}})
             send({"method": "item/reasoning/summaryTextDelta", "params": {**common, "delta": "思考"}})
             send({"method": "item/agentMessage/delta", "params": {**common, "delta": "你好"}})
             send({"method": "item/completed",
                   "params": {**common, "item": {"type": "agentMessage", "id": "text", "text": "你好"}}})
-            if mode == "fatal":
-                send({"method": "error", "params": {**common, "willRetry": False}})
+            if mode in ("fatal", "auth-error"):
+                send({"method": "error", "params": {**common, "willRetry": False,
+                      "error": {"message": "401 unauthorized private-token"} if mode == "auth-error" else {}}})
             else:
                 send({"method": "turn/completed",
                       "params": {**common, "turn": {"id": turn_id, "status": "completed"}}})

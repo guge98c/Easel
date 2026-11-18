@@ -97,6 +97,18 @@ def test_native_model_endpoint_uses_project_root_without_writing_config(sandbox,
     assert not list(web.SESSIONS_DIR.glob("harness/*"))
 
 
+def test_native_model_endpoint_supports_hermes(sandbox, monkeypatch):
+    async def models(selected, request):
+        assert selected == "hermes"
+        assert request.cwd == web.PROJECT_ROOT
+        return [{"id": "provider/model", "label": "Model", "default": True}]
+
+    monkeypatch.setattr(native_models, "available_models", models)
+    response = sandbox.post("/api/settings/harness/models/hermes")
+    assert response.status_code == 200
+    assert response.json()["models"][0]["id"] == "provider/model"
+
+
 @pytest.mark.parametrize(("error", "status"), [
     (HarnessError("secret-test-key"), 409),
     (OSError("secret-test-key"), 409),
@@ -118,6 +130,229 @@ def request_for(tmp_path, runtime, mode="normal", native_id="", model="test-mode
            "FAKE_HARNESS_AUDIT": str(tmp_path / "audit.jsonl"), "OPENAI_API_KEY": "secret-test-key"}
     return RunRequest("hello", tmp_path, env, native_id, model, "read-only", 10,
                       (sys.executable, str(FIXTURE), runtime))
+
+
+@pytest.mark.parametrize("mode,state", [("login-success", "success"), ("login-failure", "failed"),
+                                        ("login-bad-url", "failed")])
+def test_codex_login_handles_early_completion_and_redacts_failures(tmp_path, mode, state):
+    from easel.harnesses.codex_login import CodexLogin
+    async def scenario():
+        login = CodexLogin()
+        await login.start(request_for(tmp_path, "codex", mode))
+        await login.task
+        result = login.snapshot()
+        assert result["state"] == state
+        assert "authUrl" not in result and "userCode" not in result
+        assert "private-token" not in json.dumps(result) and "evil.example" not in json.dumps(result)
+        assert not login.pending
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("method", ["browser", "device"])
+def test_codex_login_pending_is_reused_and_cancelled_without_logout(tmp_path, method):
+    from easel.harnesses.codex_login import CodexLogin
+    async def scenario():
+        login = CodexLogin()
+        request = request_for(tmp_path, "codex", "login-pending")
+        result = await login.start(request, method)
+        assert result["state"] == "pending"  # Unrelated completion must not finish this attempt.
+        assert result["authUrl"].startswith("https://")
+        if method == "device":
+            assert result["userCode"] == "TEST-1234"
+        assert (await login.start(request, method))["id"] == result["id"]
+        with pytest.raises(HarnessError):
+            await login.cancel("stale-id")
+        assert login.pending
+        cancelled = await login.cancel(result["id"])
+        assert cancelled["state"] == "cancelled" and "authUrl" not in cancelled
+        assert not login.pending
+        methods = [row.get("method") for row in audit(tmp_path)]
+        assert methods.count("account/login/start") == 1
+        assert "account/login/cancel" in methods and "account/logout" not in methods
+    asyncio.run(scenario())
+
+
+def test_codex_login_timeout_and_shutdown_cleanup(tmp_path, monkeypatch):
+    from easel.harnesses import codex_login
+    monkeypatch.setattr(codex_login, "TIMEOUT_CODEX_LOGIN", 0.02)
+    async def scenario():
+        login = codex_login.CodexLogin()
+        await login.start(request_for(tmp_path, "codex", "login-pending"))
+        await login.task
+        assert login.snapshot()["state"] == "expired"
+        assert "authUrl" not in login.snapshot()
+        await login.start(request_for(tmp_path, "codex", "login-pending"))
+        await login.close()
+        assert login.snapshot()["state"] == "cancelled" and not login.pending
+    asyncio.run(scenario())
+
+
+def test_codex_login_start_failure_never_leaves_waiting_browser(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from easel.harnesses import codex_login
+    def unavailable(_):
+        raise HarnessError("sensitive native error")
+    monkeypatch.setattr(codex_login, "base_command", unavailable)
+    async def scenario():
+        login = codex_login.CodexLogin()
+        result = await asyncio.wait_for(login.start(replace(request_for(tmp_path, "codex"), command=())), 1)
+        assert result["state"] == "failed" and "sensitive" not in str(result)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "http://auth.openai.com/login",
+                                "https://auth.openai.com.evil.test/login", "https://user@chatgpt.com/login",
+                                "https://chatgpt.com:1234/login", "https://evil.test/login"])
+def test_codex_login_rejects_untrusted_redirect_urls(url):
+    from easel.harnesses.codex_login import official_login_url
+    with pytest.raises(HarnessError):
+        official_login_url(url)
+
+
+def test_codex_login_routes_preserve_settings_and_enforce_task_guard(sandbox, monkeypatch, tmp_path):
+    from easel.harnesses.codex_login import CodexLogin
+    monkeypatch.setattr(web, "_CODEX_LOGIN", CodexLogin())
+    monkeypatch.setattr(web, "_codex_diagnostic_request", lambda *args: request_for(tmp_path, "codex", "login-pending"))
+    before = (web.OUTPUTS_DIR / "_harness" / "config.json").read_bytes()
+    response = sandbox.post("/api/settings/harness/codex/login", json={"method": "browser"})
+    assert response.status_code == 200 and response.json()["state"] == "pending"
+    identifier = response.json()["id"]
+    state = sandbox.get("/api/settings/harness/codex/login")
+    assert state.headers["cache-control"] == "no-store" and state.json()["id"] == identifier
+    assert sandbox.post("/api/settings/harness/codex/probe", json={}).status_code == 409
+    assert sandbox.post("/api/settings/harness/codex/login/cancel", json={"id": identifier}).json()["state"] == "cancelled"
+    assert (web.OUTPUTS_DIR / "_harness" / "config.json").read_bytes() == before
+    monkeypatch.setattr(web, "_RUNNING_CHAT", {"busy": object()})
+    assert sandbox.post("/api/settings/harness/codex/login", json={}).status_code == 409
+    assert sandbox.post("/api/settings/harness/codex/login", json={"method": "bad"}).status_code == 400
+
+
+def test_codex_logout_calls_native_account_logout_and_preserves_easel_state(sandbox, monkeypatch, tmp_path):
+    from easel.harnesses.codex_login import CodexLogin
+    monkeypatch.setattr(web, "_CODEX_LOGIN", CodexLogin())
+    monkeypatch.setattr(web, "_codex_diagnostic_request", lambda *args: request_for(tmp_path, "codex"))
+    before = (web.OUTPUTS_DIR / "_harness" / "config.json").read_bytes()
+    response = sandbox.post("/api/settings/harness/codex/logout")
+    assert response.status_code == 200 and response.json()["state"] == "logged_out"
+    assert "account/logout" in [row.get("method") for row in audit(tmp_path)]
+    assert (web.OUTPUTS_DIR / "_harness" / "config.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("mode,state", [("normal", "authenticated"), ("logged-out", "unauthenticated"),
+                                        ("external", "external"), ("quota-unavailable", "authenticated")])
+def test_codex_diagnostics_redacts_account_and_does_not_infer(tmp_path, mode, state):
+    from easel.harnesses.codex_diagnostics import account_status
+    result = asyncio.run(account_status(request_for(tmp_path, "codex", mode)))
+    assert result["state"] == state
+    assert "private" not in json.dumps(result) and "do-not-expose" not in json.dumps(result)
+    assert all(row.get("method") not in ("thread/start", "turn/start") for row in audit(tmp_path))
+    if mode == "normal":
+        assert result["windows"] == [{"window": "primary", "usedPercent": 25,
+                                      "windowDurationMins": 300, "resetsAt": 1900000000}]
+
+
+@pytest.mark.parametrize("mode,code", [("normal", None), ("auth-error", "auth"), ("error", "model")])
+def test_codex_probe_is_ephemeral_readonly_and_reports_inference_failure(tmp_path, mode, code):
+    from dataclasses import replace
+    from easel.harnesses.codex_diagnostics import probe
+    result = asyncio.run(probe(replace(request_for(tmp_path, "codex", mode), codex_effort="low")))
+    assert result["ok"] is (code is None)
+    if code:
+        assert result["error"]["code"] == code
+        assert "private-token" not in json.dumps(result) and "secret-test-key" not in json.dumps(result)
+    messages = {row.get("method"): row.get("params") for row in audit(tmp_path)}
+    assert messages["thread/start"]["ephemeral"] is True
+    assert messages["thread/start"]["sandbox"] == "read-only"
+    assert messages["turn/start"]["approvalPolicy"] == "never"
+    assert messages["turn/start"]["effort"] == "low"
+
+
+def test_codex_progress_usage_images_and_effort_are_thread_scoped(tmp_path):
+    from dataclasses import replace
+    events = []
+    request = replace(request_for(tmp_path, "codex", "progress"),
+                      codex_effort="high", images=(str(tmp_path / "image.png"),))
+    request = replace(request, env={**request.env, "FAKE_PROGRESS_COMMAND": "cat README.md # secret-test-key"})
+    async def reject(questions):
+        raise AssertionError("No approvals expected")
+    asyncio.run(CodexAdapter().run(request, lambda *event: events.append(event), reject, lambda _: None))
+    activity = "\n".join(text for kind, text in events if kind == "activity")
+    assert "cat README.md" in activity and "退出码 0" in activity and "outputs/draft.txt" in activity
+    assert "123 tokens" in activity and "9999" not in activity
+    assert "secret-test-key" not in activity
+    turn = next(row["params"] for row in audit(tmp_path) if row.get("method") == "turn/start")
+    assert turn["effort"] == "high"
+    assert turn["input"][-1] == {"type": "localImage", "path": str(tmp_path / "image.png")}
+
+
+def test_codex_catalog_exposes_actual_efforts_and_modalities(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_models, "base_command", lambda _: [sys.executable, str(FIXTURE), "codex"])
+    result = asyncio.run(native_models.available_models("codex", request_for(tmp_path, "codex", "capabilities")))
+    assert result[0]["efforts"] == ["low", "high"]
+    assert result[0]["defaultEffort"] == "high"
+    assert result[0]["inputModalities"] == ["text", "image"]
+
+
+def test_codex_stderr_failure_returns_only_safe_actionable_hint(tmp_path):
+    from dataclasses import replace
+    request = request_for(tmp_path, "codex", "stderr-exit")
+    request = replace(request, env={**request.env, "EASEL_AGENT_RUNTIME": "codex"})
+    async def reject(questions):
+        raise AssertionError("No approval expected")
+    with pytest.raises(HarnessError, match="codex login") as error:
+        asyncio.run(CodexAdapter().run(request, lambda *_: None, reject, lambda _: None))
+    assert "do-not-expose" not in str(error.value)
+
+
+def test_codex_diagnostic_endpoints_do_not_save_and_validate_options(sandbox, monkeypatch):
+    from easel.harnesses import codex_diagnostics
+    async def status(request):
+        assert request.cwd == web.PROJECT_ROOT and not request.native_id
+        return {"state": "authenticated", "windows": []}
+    async def probe(request):
+        assert request.model == "preview-model" and request.codex_effort == "high"
+        assert request.sandbox == "read-only" and not request.codex_auto_approve
+        return {"ok": True}
+    monkeypatch.setattr(codex_diagnostics, "account_status", status)
+    monkeypatch.setattr(codex_diagnostics, "probe", probe)
+    before = (web.OUTPUTS_DIR / "_harness" / "config.json").read_bytes()
+    assert sandbox.get("/api/settings/harness/codex/status").json()["state"] == "authenticated"
+    assert sandbox.post("/api/settings/harness/codex/probe", json={
+        "model": "preview-model", "effort": "high"}).json()["ok"]
+    assert sandbox.post("/api/settings/harness/codex/probe", json={"effort": "invalid"}).status_code == 400
+    assert (web.OUTPUTS_DIR / "_harness" / "config.json").read_bytes() == before
+    monkeypatch.setattr(web, "_CODEX_PROBE_RUNNING", True)
+    assert sandbox.post("/api/settings/harness/codex/probe", json={}).status_code == 409
+
+
+def test_codex_effort_setting_roundtrip_and_invalid_value(sandbox):
+    result = sandbox.post("/api/settings/harness", json={"runtime": "codex", "codex_effort": "high"})
+    assert result.status_code == 200 and result.json()["codex_effort"] == "high"
+    assert sandbox.post("/api/settings/harness", json={"runtime": "api"}).json()["codex_effort"] == "high"
+    assert sandbox.post("/api/settings/harness", json={"runtime": "codex", "codex_effort": "bad"}).status_code == 400
+
+
+def test_codex_images_validate_ownership_before_returning_paths(sandbox):
+    from fastapi import HTTPException
+    response = sandbox.post("/api/upload", data={"sessionId": "picture-session"},
+                            files={"files": ("picture.png", b"fake-image", "image/png")})
+    assert response.status_code == 200
+    attachment = response.json()["files"][0]
+    request = web.ChatRequest(message="Describe", sessionId="picture-session", attachments=[attachment])
+    images = web._codex_images(request)
+    assert len(images) == 1 and Path(images[0]).is_absolute() and Path(images[0]).is_file()
+    with pytest.raises(HTTPException) as error:
+        web._codex_images(web.ChatRequest(message="Describe", sessionId="other-session", attachments=[attachment]))
+    assert error.value.status_code == 403
+    if os.name == "nt":
+        return  # Creating symlinks requires separate Windows privileges.
+    target = web.OUTPUTS_DIR / "other-image.png"
+    target.write_bytes(b"private")
+    Path(images[0]).unlink()
+    Path(images[0]).symlink_to(target)
+    with pytest.raises(HTTPException) as error:
+        web._codex_images(request)
+    assert error.value.status_code == 403
 
 
 def audit(tmp_path):
@@ -809,6 +1044,144 @@ def test_web_stream_replay_resume_and_delete(sandbox, monkeypatch):
     assert sandbox.post("/api/chat", json={"sessionId": "same", "message": "hello"}).status_code == 409
     assert sandbox.delete("/api/session/same").json()["deleted"]
     assert not store.binding(web.SESSIONS_DIR, "same")
+
+
+@pytest.mark.parametrize("runtime", ["codex", "opencode", "acp"])
+@pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream"])
+def test_native_stream_persists_identity_and_rejects_duplicate(sandbox, monkeypatch, runtime, endpoint):
+    from easel.run_store import RunStore
+    calls = []
+    monkeypatch.setattr(web, "_chat_backend", lambda key: runtime)
+
+    class Fake:
+        async def run(self, request, emit, ask, bind):
+            record = RunStore(web.SESSIONS_DIR / "runs.sqlite3").get("native-turn")
+            assert record.backend == runtime and record.state == "running"
+            assert web._session_lock("same").locked()
+            calls.append(request)
+            bind("native-session")
+            emit("token", "saved result")
+
+    monkeypatch.setattr(web.harnesses, "adapter", lambda runtime: Fake())
+    payload = {"message": "hello", "sessionId": "same", "turnId": "native-turn"}
+    response = sandbox.post(endpoint, json=payload)
+    assert response.status_code == 200
+    if endpoint == "/api/chat":
+        assert response.json()["turnId"] == "native-turn"
+    result = sandbox.get("/api/chat/jobs/native-turn").json()
+    assert (result["backend"], result["state"], result["version"]) == (runtime, "succeeded", 3)
+    assert result["session_id"] == "same" and result["finished_at"]
+    event_file = web._job_event_file("native-turn")
+    log = event_file.read_bytes() if event_file.exists() else None
+    assert sandbox.post("/api/chat/stream", json=payload).status_code == 409
+    assert sandbox.post("/api/chat", json=payload).status_code == 409
+    assert len(calls) == 1
+    assert (event_file.read_bytes() if event_file.exists() else None) == log
+
+
+@pytest.mark.parametrize("stage", ["create", "running"])
+def test_native_storage_failure_prevents_dispatch(sandbox, monkeypatch, stage):
+    from easel.run_store import RunStore
+    import sqlite3
+
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("injected write failure")
+
+    def forbidden(runtime):
+        raise AssertionError("storage failure must prevent adapter dispatch")
+
+    monkeypatch.setattr(web.harnesses, "adapter", forbidden)
+    monkeypatch.setattr(RunStore, "create" if stage == "create" else "transition", unavailable)
+    response = sandbox.post("/api/chat/stream", json={
+        "message": "hello", "sessionId": "same", "turnId": "storage-failure"})
+    assert response.status_code == (503 if stage == "create" else 200)
+    if stage == "running":
+        assert "event: error" in response.text
+        assert sandbox.get("/api/chat/jobs/storage-failure").json()["state"] == "queued"
+    assert not web._RUNNING_CHAT and not web._HARNESS_TASKS
+    assert not web._session_lock("same").locked()
+
+
+@pytest.mark.parametrize("runtime", ["codex", "opencode", "acp"])
+def test_stream_ledger_survives_native_process_restart(sandbox, monkeypatch, tmp_path, runtime):
+    from dataclasses import replace
+    from easel.harnesses.rpc import close_sessions
+    from easel.run_store import RunStore
+
+    protocol = "codex" if runtime == "codex" else "acp"
+    native = web.harnesses.ADAPTERS[runtime]
+    monkeypatch.setattr(web, "_chat_backend", lambda key: runtime)
+
+    class LocalProtocol:
+        async def run(self, request, *args):
+            fixture = request_for(tmp_path, protocol, mode="stable-resume")
+            await native.run(replace(request, env=fixture.env, command=fixture.command), *args)
+
+    monkeypatch.setattr(web.harnesses, "adapter", lambda runtime: LocalProtocol())
+
+    async def exercise():
+        try:
+            for turn in ("before-restart", "after-restart"):
+                response = await web.api_chat_stream(web.ChatRequest(
+                    message="hello", sessionId="durable-session", turnId=turn))
+                events = [event async for event in response.body_iterator]
+                assert any(event["event"] == "token" and "你好" in event["data"] for event in events)
+                await close_sessions("durable-session")
+                record = RunStore(web.SESSIONS_DIR / "runs.sqlite3").get(turn)
+                assert record.state == "succeeded" and record.backend == runtime
+            methods = [message.get("method") for message in audit(tmp_path)]
+            assert methods.count("initialize") == 2
+            assert methods.count("thread/start" if protocol == "codex" else "session/new") == 1
+            assert methods.count("thread/resume" if protocol == "codex" else "session/load") == 1
+            assert methods.count("turn/start" if protocol == "codex" else "session/prompt") == 2
+        finally:
+            await close_sessions()
+
+    asyncio.run(exercise())
+
+
+def test_native_interruption_is_unknown_and_snapshot_failure_releases_locks(sandbox, monkeypatch):
+    from easel.chat_runs import DirectChatRun
+    from easel.run_store import RunStore
+
+    async def exercise():
+        started = asyncio.Event()
+
+        class Fake:
+            async def run(self, request, emit, ask, bind):
+                bind("native-session")
+                started.set()
+                await asyncio.Future()
+
+        monkeypatch.setattr(web.harnesses, "adapter", lambda runtime: Fake())
+        save = web._save_turn
+
+        def fail_final(pk, state, *args):
+            if state == "done":
+                raise OSError("snapshot disk failure")
+            save(pk, state, *args)
+
+        monkeypatch.setattr(web, "_save_turn", fail_final)
+        run = DirectChatRun(web.SESSIONS_DIR / "runs.sqlite3", "codex")
+        await run.create("cancelled-native", "same")
+        task = asyncio.create_task(web._run_harness_chat(
+            web.ChatRequest(message="hello", turnId="cancelled-native"), "same", "hello",
+            "codex", web._harness_settings(), lambda *a: None, run=run))
+        await asyncio.wait_for(started.wait(), 3)
+        task.cancel()
+        with pytest.raises(OSError, match="snapshot disk failure"):
+            await task
+        record = RunStore(run.path).get("cancelled-native")
+        assert record.state == "unknown" and record.finished_at is None
+        assert not web._RUNNING_CHAT and not web._HARNESS_TASKS
+        assert not web._session_lock("same").locked()
+        xlock = web._CrossProcLock("same")
+        try:
+            assert xlock.acquire(0)
+        finally:
+            xlock.release()
+
+    asyncio.run(exercise())
 
 
 def test_native_stream_disconnect_keeps_background_turn_and_result(sandbox, monkeypatch):

@@ -58,7 +58,7 @@ class ACPAdapter:
                     "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False},
                                            "terminal": False}})
             initialized = rpc.initialized
-            if initialized.get("protocolVersion") != 1:
+            if not isinstance(initialized, dict) or initialized.get("protocolVersion") != 1:
                 raise HarnessError("Agent 不支持 ACP v1")
             capabilities = initialized.get("agentCapabilities") or {}
             params = {"cwd": str(request.cwd), "mcpServers": []}
@@ -68,26 +68,20 @@ class ACPAdapter:
                 if not capabilities.get("loadSession"):
                     raise HarnessError("此 ACP Agent 不支持历史续接；请新建对话")
                 result = await rpc.call("session/load", {**params, "sessionId": session_id})
+                if not isinstance(result, dict):
+                    raise HarnessError("ACP 未能载入原生会话；不会自动新建或替换历史，请检查原生会话")
                 if result.get("sessionId", session_id) != session_id:
                     raise HarnessError("ACP 返回了不同的原生会话 ID，不会替换已有历史")
             else:
                 result = await rpc.call("session/new", params)
-                session_id = result.get("sessionId", "")
+                session_id = result.get("sessionId", "") if isinstance(result, dict) else ""
                 if not session_id:
                     raise HarnessError("ACP Agent 未返回会话 ID")
             bind(session_id)
             rpc.native_id = session_id
             rpc.session_info = result
             if request.model:
-                config_options = result.get("configOptions") or []
-                model_option = next((option for option in config_options if option.get("category") == "model"), None)
-                if model_option:
-                    await rpc.call("session/set_config_option", {
-                        "sessionId": session_id, "configId": model_option["id"], "value": request.model})
-                elif result.get("models"):
-                    await rpc.call("session/set_model", {"sessionId": session_id, "modelId": request.model})
-                else:
-                    raise HarnessError("此 ACP Agent 未提供模型切换能力，请清空覆盖值使用原生配置")
+                await self.set_model(rpc, result, session_id, request.model)
             active = True
             prompt = harness_instructions(request) + "\n\n" + request.prompt
             pending = asyncio.create_task(rpc.call("session/prompt", {
@@ -97,6 +91,8 @@ class ACPAdapter:
                 # Keep the original response alive: ACP v1 acknowledges cancel
                 # by resolving session/prompt, not by replying to session/cancel.
                 result = await asyncio.shield(pending)
+                if not isinstance(result, dict):
+                    raise HarnessError("Agent 未返回可确认的本轮完成结果")
                 if result.get("stopReason") != "end_turn":
                     raise HarnessError(f"Agent 本轮未正常完成：{result.get('stopReason', 'unknown')}")
             except asyncio.CancelledError:
@@ -113,6 +109,17 @@ class ACPAdapter:
                 if not pending.done():
                     pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
+
+    async def set_model(self, rpc, result, session_id: str, model: str) -> None:
+        config_options = result.get("configOptions") or []
+        model_option = next((option for option in config_options if option.get("category") == "model"), None)
+        if model_option:
+            await rpc.call("session/set_config_option", {
+                "sessionId": session_id, "configId": model_option["id"], "value": model})
+        elif result.get("models"):
+            await rpc.call("session/set_model", {"sessionId": session_id, "modelId": model})
+        else:
+            raise HarnessError("此 ACP Agent 未提供模型切换能力，请清空覆盖值使用原生配置")
 
 
 class OpenCodeAdapter(ACPAdapter):
